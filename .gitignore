@@ -1,5 +1,6 @@
 # ── Compiled binaries ──
 /hermes-bot
+/botedition
 *.exe
 *.test
 
