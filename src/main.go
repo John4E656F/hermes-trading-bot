@@ -1,9 +1,14 @@
 package main
-
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"net/url"
 	"os"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -13,6 +18,7 @@ func main() {
 	// Check for testing argument flags
 	forceSignalToggle := false
 	scanMode := false
+	useTop100 := false
 	for _, arg := range os.Args[1:] {
 		switch arg {
 		case "--force-signal":
@@ -21,6 +27,9 @@ func main() {
 		case "--mode=scan":
 			scanMode = true
 			fmt.Println("🔍 SCAN MODE ACTIVE: Reading market data, computing indicators, and ranking setups. No orders will be routed.")
+		case "--watchlist=top100":
+			useTop100 = true
+			fmt.Println("🔁 TOP 100 MODE: Fetching top USDT pairs by 24h volume instead of fixed watchlist.")
 		}
 	}
 
@@ -46,7 +55,21 @@ func main() {
 		fmt.Printf("⚠️ [SCAN] Available balance is low ($%.2f USDT). Scan proceeds — no orders will be placed.\n", liveBalance)
 	}
 
-	watchlist := []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "SUIUSDT", "AVAXUSDT", "NEARUSDT", "APTUSDT", "LINKUSDT", "RENDERUSDT", "FETUSDT"}
+	// ── Build watchlist ──
+	// Default: 13 core assets. Use --watchlist=top100 to scan by volume.
+	var watchlist []string
+	if useTop100 {
+		var err error
+		watchlist, err = client.FetchTopSymbols(100)
+		if err != nil {
+			fmt.Printf("⚠️ Failed to fetch top 100: %v — falling back to default 13\n", err)
+			watchlist = []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "SUIUSDT", "AVAXUSDT", "NEARUSDT", "APTUSDT", "LINKUSDT", "RENDERUSDT", "FETUSDT"}
+		} else {
+			fmt.Printf("📈 Scanning top %d USDT pairs by 24h volume\n", len(watchlist))
+		}
+	} else {
+		watchlist = []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "SUIUSDT", "AVAXUSDT", "NEARUSDT", "APTUSDT", "LINKUSDT", "RENDERUSDT", "FETUSDT"}
+	}
 
 	// ── Max Position Guard ──
 	freezeEntries := false
@@ -112,6 +135,11 @@ func main() {
 	}
 
 	printAndExecuteSignals(marketData, aiClient, executor, forceSignalToggle, watchlist, freezeEntries, scanMode)
+
+	// ── 4-Hour Macro Snapshot Broadcast ──
+	if is4HourBoundary() {
+		sendTelegramSnapshot(client, marketData, watchlist, freezeEntries)
+	}
 
 	// Compile dynamic telemetry reports directly from live endpoints
 	PrintActivePositionsQueries(client)
@@ -186,8 +214,8 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 	fmt.Printf("%-10s | %-12s | %-10s | %-22s | %-6s\n", "SYMBOL", "REGIME (1D)", "ADX (1D)", "ACTIVE STRATEGY", "SIGNAL")
 fmt.Println("-----------------------------------------------------------------------------------------")
 
-	// ── Pass 1: Collect all BUY signals with 7D gain ──
-	var candidates []RankedSignal
+	// ── Pass 1: Collect all actionable signals (BUY + SELL) with 7D gain ──
+	var buyCandidates, sellCandidates []RankedSignal
 	freezeBanner := ""
 	if freezeEntries {
 		freezeBanner = " ❄️ FROZEN"
@@ -229,12 +257,21 @@ fmt.Println("-------------------------------------------------------------------
 
 		if sig.Action == ACTION_BUY {
 			gain7d := Compute7DayGain(asset.Snap1d.Candles)
-			candidates = append(candidates, RankedSignal{
+			buyCandidates = append(buyCandidates, RankedSignal{
 				Asset:  asset,
 				Signal: sig,
 				Gain7D: gain7d,
 			})
 			fmt.Printf("   📊 7-Day Strength: %+.2f%%\n", gain7d)
+		}
+		if sig.Action == ACTION_SELL {
+			gain7d := Compute7DayGain(asset.Snap1d.Candles)
+			sellCandidates = append(sellCandidates, RankedSignal{
+				Asset:  asset,
+				Signal: sig,
+				Gain7D: gain7d,
+			})
+			fmt.Printf("   📉 7-Day Weakness: %+.2f%%\n", gain7d)
 		}
 
 		if sig.Action == ACTION_HOLD {
@@ -242,15 +279,16 @@ fmt.Println("-------------------------------------------------------------------
 		}
 	}
 
-	// ── Pass 2: Rank by relative strength, cap at 3 ──
+	// ── Pass 2: Rank each pool by contextual criteria, cap at 3 per side ──
 	if scanMode {
 		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println("  🔍 SCAN: VOLUME PROFILE + RELATIVE STRENGTH REPORT")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-		// Extra volume diagnostics for trending-regime assets
-		fmt.Printf("%-10s %-12s %-10s  %-22s  %-8s\n", "SYMBOL", "REGIME", "ADX(1D)", "VOLUME SURGE", "7D GAIN")
-		for _, c := range candidates {
+		// Volume diagnostics for all candidates
+		allCandidates := append(buyCandidates, sellCandidates...)
+		fmt.Printf("%-10s %-12s %-10s  %-22s  %-10s\n", "SYMBOL", "REGIME", "ADX(1D)", "VOLUME SURGE", "7D GAIN")
+		for _, c := range allCandidates {
 			asset := c.Asset
 			avgVol := CalculateVolumeMA(asset.Snap4h.Candles, 20)
 			latestVol := asset.Snap4h.Candles[len(asset.Snap4h.Candles)-1].Volume
@@ -264,26 +302,63 @@ fmt.Println("-------------------------------------------------------------------
 			fmt.Printf("   Latest Vol: %.0f  |  20-MA Vol: %.0f  |  Ratio: %.2fx\n", latestVol, avgVol, latestVol/avgVol)
 		}
 
-		// Ranked top 3
-		top3 := RankSignalsByGain(candidates, 3)
+		// Ranked top longs
+		topLongs := RankSignalsByGain(buyCandidates, 3)
 		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		fmt.Println("  🏆 TOP 3 RELATIVE STRENGTH LEADERS (7D Gain)")
+		fmt.Println("  🏆 TOP LONGS (Ranked by 7D Gain)")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		fmt.Printf("%-3s %-10s %-14s %-12s %-10s\n", "RNK", "SYMBOL", "STRATEGY", "REGIME", "7D GAIN")
-		for i, c := range top3 {
-			fmt.Printf("#%-2d %-10s %-14s %-12s %+.2f%%\n",
-				i+1, c.Asset.Symbol, c.Signal.Strategy, c.Signal.Regime.String(), c.Gain7D)
+		if len(topLongs) > 0 {
+			fmt.Printf("%-3s %-10s %-14s %-12s %-10s\n", "RNK", "SYMBOL", "STRATEGY", "REGIME", "7D GAIN")
+			for i, c := range topLongs {
+				fmt.Printf("#%-2d %-10s %-14s %-12s %+.2f%%\n",
+					i+1, c.Asset.Symbol, c.Signal.Strategy, c.Signal.Regime.String(), c.Gain7D)
+			}
+		} else {
+			fmt.Println("  (No BUY signals — market lacking strength leaders)")
+		}
+
+		// Ranked top shorts
+		topShorts := RankSignalsByLowestGain(sellCandidates, 3)
+		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("  🐻 TOP SHORTS (Ranked by Weakest 7D Performance)")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		if len(topShorts) > 0 {
+			fmt.Printf("%-3s %-10s %-14s %-12s %-10s\n", "RNK", "SYMBOL", "STRATEGY", "REGIME", "7D GAIN")
+			for i, c := range topShorts {
+				fmt.Printf("#%-2d %-10s %-14s %-12s %+.2f%%\n",
+					i+1, c.Asset.Symbol, c.Signal.Strategy, c.Signal.Regime.String(), c.Gain7D)
+			}
+		} else {
+			fmt.Println("  (No SELL signals — no assets showing material weakness)")
 		}
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println("\n🔍 SCAN COMPLETE — No orders routed. Use normal mode to execute.")
 
 	} else if freezeEntries {
 		fmt.Println("\n❄️ ENTRY FREEZE: Max positions reached. All BUY signals are dashboard-only — no orders placed.\n")
-	} else if len(candidates) > 0 {
-		originalCount := len(candidates)
-		filtered := RankSignalsByGain(candidates, 3)
-		if len(filtered) < originalCount {
-			fmt.Printf("\n📊 Relative strength co-ranking: %d candidates → top %d by 7-day gain\n", originalCount, len(filtered))
+	} else {
+		// Merge ranked longs + ranked shorts, cap combined at 3
+		topLongs := RankSignalsByGain(buyCandidates, 3)
+		topShorts := RankSignalsByLowestGain(sellCandidates, 3)
+		var filtered []RankedSignal
+		filtered = append(filtered, topLongs...)
+		filtered = append(filtered, topShorts...)
+
+		// Sort merged pool so strongest signals execute first
+		sort.Slice(filtered, func(i, j int) bool {
+			// Higher absolute 7D change = stronger signal regardless of direction
+			return math.Abs(filtered[i].Gain7D) > math.Abs(filtered[j].Gain7D)
+		})
+
+		// Cap total execution at 3 to respect position sizing limits
+		if len(filtered) > 3 {
+			filtered = filtered[:3]
+		}
+
+		total := len(buyCandidates) + len(sellCandidates)
+		if len(filtered) < total {
+			fmt.Printf("\n📊 Contextual ranking: %d candidates (L:%d/S:%d) → top %d for execution\n",
+				total, len(buyCandidates), len(sellCandidates), len(filtered))
 		}
 		fmt.Println()
 
@@ -312,4 +387,135 @@ fmt.Println("-------------------------------------------------------------------
 		}
 	}
 	fmt.Println("=========================================================================================")
+}
+
+// ── 4-Hour Boundary Check ─────────────────────────────────────────────
+// Returns true at the start of each 4-hour candle (00/04/08/12/16/20 UTC)
+// during the first 15 minutes of the new block.
+func is4HourBoundary() bool {
+	now := time.Now().UTC()
+	hour := now.Hour()
+	min := now.Minute()
+	return min < 15 && (hour%4 == 0)
+}
+
+// ── 4-Hour Macro Snapshot Telegram Broadcast ──────────────────────────
+// Compiles a structured overview of the entire asset matrix and sends it
+// via Telegram. Runs even when the circuit breaker is active.
+func sendTelegramSnapshot(client *BybitClient, data MarketData, watchlist []string, freezeEntries bool) {
+	token := os.Getenv("TELEGRAM_BOT_TOKEN")
+	chatID := os.Getenv("TELEGRAM_CHAT_ID")
+	if token == "" || chatID == "" {
+		fmt.Println("⚠️ TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — skipping 4H snapshot")
+		return
+	}
+
+	// Re-fetch live balance to get the freshest number
+	liveBalance, err := fetchLiveBalance(client)
+	if err != nil {
+		liveBalance = data.LiveBalance
+	}
+
+	// Count open positions
+	openPosCount, err := fetchOpenPositionCount(client, watchlist)
+	if err != nil {
+		openPosCount = -1
+	}
+
+	// Classify assets: trending (ADX > 25) vs ranging/mixed (ADX <= 25)
+	var trending, ranging []string
+	var candidates []RankedSignal
+
+	for _, symbol := range watchlist {
+		asset, exists := data.Assets[symbol]
+		if !exists {
+			continue
+		}
+		adx := asset.Snap1d.Indicators.ADX14
+		price := asset.CurrentPrice
+
+		line := fmt.Sprintf("• %s — $%.4f (ADX: %.1f)", symbol, price, adx)
+		if adx > 25 {
+			trending = append(trending, line)
+		} else {
+			ranging = append(ranging, line)
+		}
+
+		// Collect candidates for relative strength ranking
+		gain7d := Compute7DayGain(asset.Snap1d.Candles)
+		candidates = append(candidates, RankedSignal{
+			Asset:  asset,
+			Gain7D: gain7d,
+		})
+	}
+
+	// Top 3 by relative strength
+	top3 := RankSignalsByGain(candidates, 3)
+	var top3Str []string
+	for i, c := range top3 {
+		top3Str = append(top3Str, fmt.Sprintf("#%d %s (%+.2f%%)", i+1, c.Asset.Symbol, c.Gain7D))
+	}
+	top3Label := "None"
+	if len(top3Str) > 0 {
+		top3Label = strings.Join(top3Str, ", ")
+	}
+
+	// Circuit breaker status
+	cbStatus := "🟢 GREEN"
+	if liveBalance < 5.00 {
+		cbStatus = "🔴 RED"
+	}
+
+	posLabel := fmt.Sprintf("%d/5", openPosCount)
+	if openPosCount < 0 {
+		posLabel = "?"
+	}
+
+	// Compile the message
+	trendingBlock := "• None"
+	if len(trending) > 0 {
+		trendingBlock = strings.Join(trending, "\n")
+	}
+	rangingBlock := "• None"
+	if len(ranging) > 0 {
+		rangingBlock = strings.Join(ranging, "\n")
+	}
+
+	msg := fmt.Sprintf(
+		"<b>📊 HERMES 4-HOUR MACRO SNAPSHOT</b>\n"+
+			"━━━━━━━━━━━━━━━━━━━━━━━━\n"+
+			"💰 Account Equity: <b>$%.2f</b> USDT | Live Positions: <b>%s</b>\n\n"+
+			"<b>🟢 TRENDING MATRICES (ADX > 25):</b>\n%s\n\n"+
+			"<b>🟡 RANGING / MIXED CHOP (ADX ≤ 25):</b>\n%s\n\n"+
+			"<b>🛡️ FILTER STATUS:</b>\n"+
+			"• 7-Day Leaders: %s\n"+
+			"• Circuit Breaker: %s\n",
+		liveBalance, posLabel,
+		trendingBlock,
+		rangingBlock,
+		top3Label,
+		cbStatus,
+	)
+
+	// Send via Telegram
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
+	form := url.Values{}
+	form.Set("chat_id", chatID)
+	form.Set("text", msg)
+	form.Set("parse_mode", "HTML")
+
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := httpClient.PostForm(apiURL, form)
+	if err != nil {
+		fmt.Printf("⚠️ Telegram snapshot send error: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == 200 {
+		fmt.Println("📡 4-Hour macro snapshot broadcast via Telegram")
+	} else {
+		fmt.Printf("⚠️ Telegram API error (HTTP %d): %s\n", resp.StatusCode, string(body))
+	}
 }

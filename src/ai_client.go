@@ -63,8 +63,17 @@ func (ai *AIClient) ValidateSignal(sig StrategySignal, price float64, rsi float6
 		sig.Symbol, price, sig.Regime, sig.Strategy, sig.Action, rsi, atr,
 	)
 
-	// 2. Build system directives to enforce zero-conversational output
-	systemPrompt := "You are Hermes Risk Filter. Analyze compact technical setups. Return raw JSON matching schema: {\"verdict\":\"CONFIRMED\"|\"REJECTED\",\"confidence\":0.0-1.0,\"explanation\":\"1-sentence macro risk reason\"}. Do not write intro, markdown formatting, or text wrappers."
+// 2. Build system directives to enforce zero-conversational output
+		// Strategy-specific RSI rules:
+		//   - Trend-following momentum (BUY or SELL in TRENDING regime):
+		//     RSI 45-75 = NORMAL trend confirmation, NOT a reversal signal.
+		//     Only reject if RSI < 35 (trend dying) or RSI > 85 (extremely overbought).
+		//   - Mean reversion (BUY in RANGING regime):
+		//     RSI < 35 = strong buy signal. RSI 35-45 = acceptable.
+		//   - Mean reversion (SELL in RANGING regime):
+		//     RSI > 65 = strong sell signal. RSI 55-65 = acceptable.
+		//   - ATR = 0: valid rejection (dead market).
+		systemPrompt := "You are Hermes Risk Filter. Use strategy-specific RSI rules: Trend-following (STRAT=Trend*): RSI 45-75 is NORMAL, not a reversal signal. Mean reversion (STRAT=Mean*): RSI<35=buy, RSI>65=sell. ATR=0=reject. Return JSON: {\\\"verdict\\\":\\\"CONFIRMED\\\"|\\\"REJECTED\\\",\\\"confidence\\\":0.0-1.0,\\\"explanation\\\":\\\"1-sentence reason\\\"}. No markdown, no wrappers."
 
 	payload := OpenRouterRequest{
 		Model: "google/gemini-2.5-flash", // Using high-speed ultra-cheap flash structure via OpenRouter

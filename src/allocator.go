@@ -1,5 +1,10 @@
 package main
 
+import (
+	"fmt"
+	"strconv"
+)
+
 type SignalAction string
 
 const (
@@ -19,7 +24,7 @@ type StrategySignal struct {
 func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	dailyADX := asset.Snap1d.Indicators.ADX14
 	currentRegime := ClassifyRegime(dailyADX)
-	
+
 	snap4h := asset.Snap4h
 	latestPrice := snap4h.Candles[len(snap4h.Candles)-1].Close
 	ind := snap4h.Indicators
@@ -34,17 +39,29 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		signal.Strategy = "Trend-Following Momentum"
 
 		// Volume profile validation: latest closed candle must have
-		// at least 1.5x the average volume of the last 20 bars.
+		// adequate volume relative to the 20-MA average.
+		// Threshold is ADX-dependent — very strong trends (ADX > 40)
+		// need no volume confirmation; the trend itself is the signal.
+		dailyADX := snap1d.Indicators.ADX14
 		avgVol := CalculateVolumeMA(snap4h.Candles, 20)
 		latestVol := snap4h.Candles[len(snap4h.Candles)-1].Volume
-		volSurge := latestVol > avgVol*1.5
+		volRatio := latestVol / avgVol
+		var volOk bool
+		var volMsg string
+		if dailyADX > 40 {
+			volOk = true
+			volMsg = fmt.Sprintf("Strong trend (ADX %.0f>40) bypasses volume gate (ratio=%.2fx).", dailyADX, volRatio)
+		} else {
+			volOk = volRatio >= 1.5
+			volMsg = fmt.Sprintf("4H volume ratio=%.2fx (needs 1.5x)", volRatio)
+		}
 
-		if latestPrice > ind.EMA20 && ind.SMA50 > ind.SMA200 && ind.RSI14 > 50 && volSurge {
+		if latestPrice > ind.EMA20 && ind.SMA50 > ind.SMA200 && ind.RSI14 > 50 && volOk {
 			signal.Action = ACTION_BUY
-			signal.Reason = "Price above EMA20, Golden Cross intact, RSI strong, and 4H volume surge confirms momentum."
-		} else if latestPrice > ind.EMA20 && ind.SMA50 > ind.SMA200 && ind.RSI14 > 50 && !volSurge {
+			signal.Reason = "Price above EMA20, Golden Cross intact, RSI strong. " + volMsg
+		} else if latestPrice > ind.EMA20 && ind.SMA50 > ind.SMA200 && ind.RSI14 > 50 && !volOk {
 			signal.Action = ACTION_HOLD
-			signal.Reason = "Trend criteria met but 4H volume below 1.5x 20-MA threshold. Awaiting volume confirmation."
+			signal.Reason = "Trend criteria met but " + volMsg + " below threshold."
 		} else if latestPrice < ind.EMA20 || ind.RSI14 < 40 {
 			signal.Action = ACTION_SELL
 			signal.Reason = "Price broken below major 20 EMA threshold or momentum fully collapsed."
