@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -116,6 +117,57 @@ func (c *BybitClient) GetPrivateRequest(endpoint string) ([]byte, error) {
 	defer resp.Body.Close()
 
 	return io.ReadAll(resp.Body)
+}
+
+// FetchTopSymbols retrieves the top N USDT perpetual symbols by 24h turnover.
+// Uses the public tickers endpoint (no auth required).
+func (c *BybitClient) FetchTopSymbols(n int) ([]string, error) {
+	resp, err := c.HTTPClient.Get(c.BaseURL + "/v5/market/tickers?category=linear")
+	if err != nil {
+		return nil, fmt.Errorf("tickers request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		RetCode int    `json:"retCode"`
+		RetMsg  string `json:"retMsg"`
+		Result  struct {
+			List []struct {
+				Symbol      string `json:"symbol"`
+				Turnover24h string `json:"turnover24h"`
+			} `json:"list"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode tickers: %w", err)
+	}
+	if result.RetCode != 0 {
+		return nil, fmt.Errorf("bybit tickers error [%d]: %s", result.RetCode, result.RetMsg)
+	}
+
+	type ticker struct {
+		symbol   string
+		turnover float64
+	}
+	var tickers []ticker
+	for _, t := range result.Result.List {
+		if !strings.HasSuffix(t.Symbol, "USDT") {
+			continue
+		}
+		tv, _ := strconv.ParseFloat(t.Turnover24h, 64)
+		tickers = append(tickers, ticker{symbol: t.Symbol, turnover: tv})
+	}
+	sort.Slice(tickers, func(i, j int) bool {
+		return tickers[i].turnover > tickers[j].turnover
+	})
+	if n > len(tickers) {
+		n = len(tickers)
+	}
+	symbols := make([]string, n)
+	for i := 0; i < n; i++ {
+		symbols[i] = tickers[i].symbol
+	}
+	return symbols, nil
 }
 
 // PostPrivateRequest routes authenticated execution calls directly to Bybit's engine

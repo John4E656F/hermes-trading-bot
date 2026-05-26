@@ -94,8 +94,7 @@ type RankedSignal struct {
 }
 
 // RankSignalsByGain sorts signals from strongest to weakest 7-day gain and
-// returns the top N.  This prevents correlated over-exposure when multiple
-// assets trigger simultaneously in the same cycle.
+// returns the top N.  Use for BUY signals — highest gain first.
 func RankSignalsByGain(signals []RankedSignal, max int) []RankedSignal {
 	if len(signals) <= max {
 		sort.Slice(signals, func(i, j int) bool {
@@ -106,6 +105,22 @@ func RankSignalsByGain(signals []RankedSignal, max int) []RankedSignal {
 
 	sort.Slice(signals, func(i, j int) bool {
 		return signals[i].Gain7D > signals[j].Gain7D
+	})
+	return signals[:max]
+}
+
+// RankSignalsByLowestGain sorts signals from weakest to strongest 7-day gain
+// and returns the top N.  Use for SELL signals — worst performers first.
+func RankSignalsByLowestGain(signals []RankedSignal, max int) []RankedSignal {
+	if len(signals) <= max {
+		sort.Slice(signals, func(i, j int) bool {
+			return signals[i].Gain7D < signals[j].Gain7D
+		})
+		return signals
+	}
+
+	sort.Slice(signals, func(i, j int) bool {
+		return signals[i].Gain7D < signals[j].Gain7D
 	})
 	return signals[:max]
 }
