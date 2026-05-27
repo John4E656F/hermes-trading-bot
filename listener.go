@@ -56,12 +56,7 @@ func getEnv(key, fallback string) string {
 
 type WSRequest struct {
 	Op   string   `json:"op"`
-	Args []string `json:"args"`
-}
-
-type WSAuthRequest struct {
-	Op   string   `json:"op"`
-	Args []string `json:"args"`
+	Args []string `json:"args,omitempty"` // Added omitempty for pings
 }
 
 type WSResponse struct {
@@ -74,20 +69,15 @@ type WSResponse struct {
 }
 
 type ExecutionData struct {
-	Symbol       string `json:"symbol"`
-	Side         string `json:"side"`
-	ExecType     string `json:"execType"`
-	ExecPrice    string `json:"execPrice"`
-	ExecPnl      string `json:"execPnl"`
-	ClosedSize   string `json:"closedSize"`
+	Symbol        string `json:"symbol"`
+	Side          string `json:"side"`
+	ExecType      string `json:"execType"`
+	ExecPrice     string `json:"execPrice"`
+	ExecPnl       string `json:"execPnl"`
+	ClosedSize    string `json:"closedSize"`
 	StopOrderType string `json:"stopOrderType"`
-	OrderID      string `json:"orderId"`
-	ExecID       string `json:"execId"`
-	ExecTime     string `json:"execTime"`
-	LeavesQty    string `json:"leavesQty"`
-	CumExecQty   string `json:"cumExecQty"`
-	CumExecValue string `json:"cumExecValue"`
-	OrderType    string `json:"orderType"`
+	OrderID       string `json:"orderId"`
+	ExecID        string `json:"execId"`
 }
 
 // ──────────────────────────────────────────────
@@ -114,8 +104,8 @@ func sendTelegramAlert(cfg *ListenerConfig, message string) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
 		log.Printf("⚠️ Telegram API error (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 }
@@ -127,7 +117,6 @@ func formatExecutionAlert(exec ExecutionData) string {
 		triggerType = exec.ExecType
 	}
 
-	// Determine emoji by trigger type
 	upperTrigger := strings.ToUpper(triggerType)
 	if strings.Contains(upperTrigger, "STOPLOSS") || strings.Contains(upperTrigger, "SL") {
 		emoji = "🛑"
@@ -155,23 +144,23 @@ func formatExecutionAlert(exec ExecutionData) string {
 
 	return fmt.Sprintf(
 		"%s <b>Real-Time Trade Alert!</b>\n"+
-		"• Asset: %s\n"+
-		"• Action: %s\n"+
-		"• Trigger: %s\n"+
-		"• Exec Price: $%s\n"+
-		"• %s Realized P&L: $%s USDT\n"+
-		"• Exec ID: %s",
+			"• Asset: %s\n"+
+			"• Action: %s\n"+
+			"• Trigger: %s\n"+
+			"• Exec Price: $%s\n"+
+			"• %s Realized P&L: $%s USDT\n"+
+			"• Exec ID: %s",
 		emoji, exec.Symbol, action, triggerType, exec.ExecPrice,
 		pnlIcon, execPnl, exec.ExecID,
 	)
 }
 
 // ──────────────────────────────────────────────
-// Bybit V5 WebSocket Auth (derived from docs)
+// Bybit V5 WebSocket Auth
 // ──────────────────────────────────────────────
 
 func generateWSAuthPayload(apiKey, apiSecret string) ([]byte, error) {
-	expires := strconv.FormatInt(time.Now().UnixMilli()+10000, 10) // 10s expiry
+	expires := strconv.FormatInt(time.Now().UnixMilli()+10000, 10)
 	signPayload := "GET/realtime" + expires
 
 	mac := hmac.New(sha256.New, []byte(apiSecret))
@@ -192,7 +181,7 @@ func generateWSAuthPayload(apiKey, apiSecret string) ([]byte, error) {
 type ExecutionListener struct {
 	cfg      *ListenerConfig
 	conn     *websocket.Conn
-	mu       sync.Mutex
+	mu       sync.Mutex // Only protects WriteMessage
 	stopChan chan struct{}
 }
 
@@ -203,13 +192,30 @@ func NewExecutionListener(cfg *ListenerConfig) *ExecutionListener {
 	}
 }
 
-func (l *ExecutionListener) connect() error {
+func (l *ExecutionListener) writeJSON(v interface{}) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
+	return l.conn.WriteJSON(v)
+}
 
+func (l *ExecutionListener) writeRaw(data []byte) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
+	return l.conn.WriteMessage(websocket.TextMessage, data)
+}
+
+func (l *ExecutionListener) connect() error {
+	l.mu.Lock()
 	if l.conn != nil {
 		l.conn.Close()
 	}
+	l.mu.Unlock()
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
@@ -219,7 +225,11 @@ func (l *ExecutionListener) connect() error {
 	if err != nil {
 		return fmt.Errorf("dial error: %w", err)
 	}
+
+	l.mu.Lock()
 	l.conn = conn
+	l.mu.Unlock()
+
 	log.Printf("🔌 Connected to %s", l.cfg.BybitWS)
 	return nil
 }
@@ -230,10 +240,7 @@ func (l *ExecutionListener) authenticate() error {
 		return fmt.Errorf("auth payload error: %w", err)
 	}
 
-	l.mu.Lock()
-	err = l.conn.WriteMessage(websocket.TextMessage, payload)
-	l.mu.Unlock()
-	if err != nil {
+	if err := l.writeRaw(payload); err != nil {
 		return fmt.Errorf("auth write error: %w", err)
 	}
 
@@ -260,12 +267,7 @@ func (l *ExecutionListener) subscribe(topic string) error {
 		Op:   "subscribe",
 		Args: []string{topic},
 	}
-	payload, _ := json.Marshal(req)
-
-	l.mu.Lock()
-	err := l.conn.WriteMessage(websocket.TextMessage, payload)
-	l.mu.Unlock()
-	if err != nil {
+	if err := l.writeJSON(req); err != nil {
 		return fmt.Errorf("subscribe write error: %w", err)
 	}
 
@@ -287,6 +289,26 @@ func (l *ExecutionListener) subscribe(topic string) error {
 	return nil
 }
 
+// Heartbeat Loop required by Bybit to keep connection alive
+func (l *ExecutionListener) pingLoop() {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-l.stopChan:
+			return
+		case <-ticker.C:
+			// Send {"op":"ping"} periodically
+			req := WSRequest{Op: "ping"}
+			if err := l.writeJSON(req); err != nil {
+				log.Printf("⚠️ Ping error: %v", err)
+				return // Let the read loop handle the disconnect
+			}
+		}
+	}
+}
+
 func (l *ExecutionListener) readLoop() {
 	for {
 		select {
@@ -295,10 +317,8 @@ func (l *ExecutionListener) readLoop() {
 		default:
 		}
 
-		l.mu.Lock()
+		// NO MUTEX LOCK HERE. ReadMessage blocks.
 		_, msg, err := l.conn.ReadMessage()
-		l.mu.Unlock()
-
 		if err != nil {
 			log.Printf("⚠️ Read error: %v — triggering reconnect", err)
 			return
@@ -309,6 +329,11 @@ func (l *ExecutionListener) readLoop() {
 }
 
 func (l *ExecutionListener) processMessage(raw []byte) {
+	// Fast check for pong response (heartbeat ack)
+	if strings.Contains(string(raw), `"op":"pong"`) || strings.Contains(string(raw), `"ret_msg":"pong"`) {
+		return
+	}
+
 	var envelope struct {
 		Topic string          `json:"topic"`
 		Type  string          `json:"type"`
@@ -318,12 +343,10 @@ func (l *ExecutionListener) processMessage(raw []byte) {
 		return
 	}
 
-	// Skip non-execution topics and heartbeats
 	if envelope.Topic != "execution" || envelope.Type == "snapshot" {
 		return
 	}
 
-	// Parse execution data array
 	var executions []ExecutionData
 	if err := json.Unmarshal(envelope.Data, &executions); err != nil {
 		log.Printf("⚠️ Failed to parse execution data: %v", err)
@@ -331,7 +354,6 @@ func (l *ExecutionListener) processMessage(raw []byte) {
 	}
 
 	for _, exec := range executions {
-		// Filter: position close or has P&L
 		closedSize, _ := strconv.ParseFloat(exec.ClosedSize, 64)
 		execPnl, _ := strconv.ParseFloat(exec.ExecPnl, 64)
 
@@ -345,91 +367,81 @@ func (l *ExecutionListener) processMessage(raw []byte) {
 			exec.StopOrderType, exec.ClosedSize,
 		)
 
-		// Dispatch Telegram alert
 		alert := formatExecutionAlert(exec)
 		sendTelegramAlert(l.cfg, alert)
 	}
 }
 
 // ──────────────────────────────────────────────
-// Reconnect Loop with Exponential Backoff
+// Simplified Lifecycle Manager
 // ──────────────────────────────────────────────
 
 func (l *ExecutionListener) Run() {
 	baseDelay := 1 * time.Second
 	maxDelay := 60 * time.Second
+	delay := baseDelay
 
 	for {
-		// Connect
+		select {
+		case <-l.stopChan:
+			return
+		default:
+		}
+
 		if err := l.connect(); err != nil {
-			log.Fatalf("❌ Fatal connection error: %v", err)
+			log.Printf("❌ Connection error: %v", err)
+			time.Sleep(delay)
+			delay = minDuration(delay*2, maxDelay)
+			continue
 		}
 
-		// Authenticate
 		if err := l.authenticate(); err != nil {
-			log.Printf("❌ Auth error: %v — retrying...", err)
+			log.Printf("❌ Auth error: %v", err)
 			l.conn.Close()
-			time.Sleep(baseDelay)
+			time.Sleep(delay)
+			delay = minDuration(delay*2, maxDelay)
 			continue
 		}
 
-		// Subscribe
 		if err := l.subscribe("execution.linear"); err != nil {
-			log.Printf("❌ Subscribe error: %v — retrying...", err)
+			log.Printf("❌ Subscribe error: %v", err)
 			l.conn.Close()
-			time.Sleep(baseDelay)
+			time.Sleep(delay)
+			delay = minDuration(delay*2, maxDelay)
 			continue
 		}
 
-		// Read loop — blocks until disconnect
+		// Reset delay upon successful connection
+		delay = baseDelay
+		log.Println("✅ Listening for live executions...")
+
+		// Start ping loop for THIS connection; cancel it when readLoop exits
+		pingDone := make(chan struct{})
+		go func() {
+			defer close(pingDone)
+			l.pingLoop()
+		}()
+
+		// Blocks until the connection is dropped or an error occurs
 		l.readLoop()
 
-		// Reconnect with exponential backoff
-		delay := baseDelay
-		for attempts := 0; attempts < 10; attempts++ {
-			log.Printf("🔄 Reconnecting in %v (attempt %d)...", delay, attempts+1)
-
-			select {
-			case <-l.stopChan:
-				return
-			case <-time.After(delay):
-			}
-
-			if err := l.connect(); err != nil {
-				log.Printf("⚠️ Reconnect failed: %v", err)
-				delay *= 2
-				if delay > maxDelay {
-					delay = maxDelay
-				}
-				continue
-			}
-
-			// Re-auth after reconnect
-			if err := l.authenticate(); err != nil {
-				log.Printf("⚠️ Re-auth failed: %v", err)
-				l.conn.Close()
-				delay *= 2
-				if delay > maxDelay {
-					delay = maxDelay
-				}
-				continue
-			}
-
-			// Re-subscribe
-			if err := l.subscribe("execution.linear"); err != nil {
-				log.Printf("⚠️ Re-subscribe failed: %v", err)
-				l.conn.Close()
-				delay *= 2
-				if delay > maxDelay {
-					delay = maxDelay
-				}
-				continue
-			}
-
-			log.Println("✅ Reconnected successfully")
-			break
+		// readLoop exited — connection is dead; stop the ping loop
+		// before reconnecting so a fresh one is created next cycle
+		l.mu.Lock()
+		if l.conn != nil {
+			l.conn.Close()
+			l.conn = nil
 		}
+		l.mu.Unlock()
+		<-pingDone
 	}
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (l *ExecutionListener) Stop() {
@@ -447,7 +459,7 @@ func (l *ExecutionListener) Stop() {
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Println("🎧 Hermes Execution Listener v1.0")
+	log.Println("🎧 Hermes Execution Listener v1.1")
 
 	cfg := loadListenerConfig()
 
@@ -459,12 +471,11 @@ func main() {
 	if cfg.TelegramToken != "" && cfg.TelegramChatID != "" {
 		log.Println("📱 Telegram alerts: ENABLED")
 	} else {
-		log.Println("📱 Telegram alerts: DISABLED (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)")
+		log.Println("📱 Telegram alerts: DISABLED")
 	}
 
 	listener := NewExecutionListener(cfg)
 
-	// Handle graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 

@@ -1,6 +1,6 @@
 # 🤖 Hermes Trading Bot
 
-**Multi‑asset crypto swing trading engine with AI‑verified execution, live risk guards, and regime‑aware strategy allocation.**
+**Multi‑asset crypto swing trading engine with AI‑verified execution, live risk guards, and a Three-Layer Meta-Strategy allocation.**
 
 ![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go) ![Bybit](https://img.shields.io/badge/Bybit_V5_API-Live-F7A600) ![OpenRouter](https://img.shields.io/badge/AI_Gateway-OpenRouter-8A2BE2) ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -8,41 +8,41 @@
 
 ## 🚀 Overview
 
-Hermes is a **production‑grade swing trading bot** that ingests live OHLCV data from Bybit, computes technical indicators locally in pure Go, classifies market regime via ADX, and executes bracket orders with AI‑verified signals.
+Hermes is a **production‑grade swing trading bot** that ingests live OHLCV data from Bybit, computes technical indicators locally in pure Go, evaluates setups across three independent strategy lenses (Mean Reversion, Open Interest/Funding Squeeze, and Multi-Week Breakout), and executes bracket orders with AI‑verified signals.
 
-The entire pipeline runs autonomously via crontab, with **zero external dependencies** (Go stdlib only) and **no paid API subscriptions** for the math engine — all indicators are computed locally.
+The entire pipeline runs autonomously via crontab, with **zero external dependencies** (Go stdlib only) and **no paid API subscriptions** for the math engine.
 
 ---
 
 ## ✨ Features
 
-### 📊 Data Ingestion
-- **12‑asset watchlist**: BTC, ETH, SOL, BNB, XRP, ADA, SUI, AVAX, NEAR, APT, LINK, RENDER
-- **Bybit V5 REST API**: Fetches 4‑hour & daily OHLCV candles (200 bars each)
-- **Rate‑limit friendly**: 200ms delay between symbols, connection pooling
+### 📊 Data Ingestion & Dynamic Watchlists
+- **Dynamic Watchlist Scanning**: Use `--watchlist=top100` to automatically fetch and scan the top 100 USDT pairs by 24h turnover, or rely on the default fixed 13-asset list.
+- **Bybit V5 REST API**: Fetches 4‑hour & daily OHLCV candles, real-time Open Interest, and Funding Rate history.
+- **Rate‑limit friendly**: Concurrent data fetching with a 10-goroutine semaphore pool to respect Bybit rate limits.
 
-### 🧠 Technical Indicators (Pure Go)
-| Indicator | Period | Use |
-|---|---|---|
-| **EMA** | 20 | Short‑term trend direction |
-| **SMA** | 50 / 200 | Medium & long‑term trend (Golden / Death Cross) |
-| **RSI** | 14 | Overbought / oversold divergence |
-| **ATR** | 14 | Stop‑loss buffer & position sizing |
-| **ADX** | 14 (1D) | Trend strength → regime classification |
-| **Bollinger Bands** | 20, 2σ | Mean reversion triggers |
+### 🧠 Three-Layer Meta-Strategy (Pure Go)
 
-### 🧭 Regime‑Aware Strategy
+The bot evaluates each asset across three independent lenses to calculate a `Conviction` score (1, 2, or 3):
 
-```
-ADX(1D) > 25  → TRENDING      → Trend‑Following Momentum
-ADX(1D) < 20  → RANGING       → Statistical Mean Reversion
-20 ≤ ADX ≤ 25 → MIXED         → Neutral Filter (stand aside)
-```
+1. **Strategy 1: Mean Reversion (Volume Profile)**
+   - Computes a dynamically sizing 50-bin volume profile.
+   - Triggers buys below the Value Area Low (VAL) and sells above the Value Area High (VAH), targeting reversion to the Point of Control (POC).
 
-### 🤖 AI Verification Gateway
-- **OpenRouter** validates every BUY signal before execution
-- **Confidence scoring**: 0.60–1.00 scale
-- **Zero API cost** on HOLD signals — only calls the LLM when a real entry is detected
+2. **Strategy 2: The Alpha Generator (OI & Funding Squeeze)**
+   - Tracks mathematical deviations in derivatives liquidity.
+   - Triggers "Short Squeeze" long setups when Open Interest spikes (>8% in 24h) and Funding Rates flip deeply negative, whilst price acts against the 20-EMA.
+
+3. **Strategy 3: The Capital Scaler (Multi-Week Consolidation Breakout)**
+   - Monitors for extended horizontal volatility compression (e.g., 3+ weeks in a < 5% range).
+   - "Primes" the asset and triggers on the eventual breakout accompanied by a 1.5x volume surge.
+
+### 🤖 AI Verification & Conviction-Based Routing
+
+The strategy conviction score dictates position sizing and AI validation:
+- **Conviction 1 (0.60 Confidence)**: 0.5% risk. Standard trade. Routed through OpenRouter AI for macro confirmation before execution.
+- **Conviction 2 (0.75 Confidence)**: 1.0% risk. Double alignment. AI validation bypassed for speed and cost efficiency.
+- **Conviction 3 (0.90 Confidence)**: 1.5% risk. The "Liquidation Breakout" Meta-Signal. Maximum risk applied. AI validation bypassed.
 
 ### 🛡️ Multi‑Layer Risk Guards
 
@@ -50,23 +50,20 @@ ADX(1D) < 20  → RANGING       → Statistical Mean Reversion
 |---|---|---|
 | **Circuit Breaker** | Balance < $5.00 | 🚨 Full halt, `os.Exit(1)` |
 | **Max Positions** | ≥ 5 open | ❄️ Freeze new entries |
-| **Volume Profile** | Volume < 1.5× 20‑MA | ⛔ Block trend entries |
-| **Confidence Sizing** | 0.60–0.69 → 0.5% risk | 📉 Reduced position |
-| **Confidence Sizing** | 0.70–0.79 → 1.0% risk | 📊 Standard position |
-| **Confidence Sizing** | ≥ 0.80 → 1.5% risk | 📈 Full position |
+| **AI Gate** | All single-strategy signals verified | 🤖 Block illogical setups |
 | **Co‑Ranking** | Top 3 by 7D gain | 🏆 Prevent correlated over‑exposure |
 
 ### 🔥 Order Execution
 - **Isolated margin mode** (3x leverage cap)
 - **Bracket orders**: Market entry + SL (2× ATR) + TP (2.5× ATR → 1:2.5 R:R)
 - **Trailing stop**: EMA20 distance, activated at TP level
-- **Dynamic precision**: Price‑aware decimal formatting for all 12 assets
+- **Dynamic precision**: Price‑aware decimal formatting for all assets
 
 ### 🔍 Diagnostic Mode
 ```bash
-./hermes-bot --mode=scan
+go run . --mode=scan --watchlist=top100
 ```
-Runs full ingestion + signal evaluation without AI verification or order execution — ideal for testing strategy changes.
+Runs full ingestion + multi-strategy evaluation across the top 100 volume leaders without AI verification or order execution — ideal for scanning the market daily.
 
 ---
 
@@ -75,7 +72,7 @@ Runs full ingestion + signal evaluation without AI verification or order executi
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          CRONTAB (every 15min)                      │
-│    */15 * * * * /home/hermes/hermes-trading-bot/hermes-bot         │
+│    */15 * * * * cd /home/hermes/hermes-trading-bot/src && go run .  │
 └───────────────────────────┬─────────────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────────────┐
@@ -84,21 +81,22 @@ Runs full ingestion + signal evaluation without AI verification or order executi
 │     ├── Fetch live wallet balance (private endpoint)               │
 │     └── Circuit breaker check (exit if < $5.00)                    │
 ├─────────────────────────────────────────────────────────────────────┤
-│  2. 📊 Data Ingestion (12 assets × 2 timeframes)                  │
-│     ├── 4h candles (limit=200) → ComputeAllIndicators()           │
-│     └── 1d candles (limit=200) → ComputeAllIndicators() + ADX()   │
+│  2. 📊 Concurrent Data Ingestion                                   │
+│     ├── 4h/1d candles (limit=200) → ComputeAllIndicators()         │
+│     └── Public Endpoints → Fetch OI + Fetch Funding                │
 ├─────────────────────────────────────────────────────────────────────┤
-│  3. 🧠 Strategy Evaluation                                         │
-│     ├── ClassifyRegime(ADX14) → TRENDING / RANGING / MIXED         │
-│     ├── EvaluateMarketSnapshot(asset) → StrategySignal             │
-│     └── Collect BUY signals into RankedSignal[] with 7D gain       │
+│  3. 🧠 Meta-Strategy Evaluation                                    │
+│     ├── EvaluateS1MeanReversion(VP)                                │
+│     ├── EvaluateS2Squeeze(OI, Funding, Price, EMA20)               │
+│     ├── EvaluateS3Breakout(Consolidation, Volume)                  │
+│     └── Calculate Conviction (1, 2, or 3) & Assign Confidence      │
 ├─────────────────────────────────────────────────────────────────────┤
 │  4. 🏆 Relative Strength Co‑Ranking                                │
 │     └── RankSignalsByGain(candidates, 3) → top 3 entries           │
 ├─────────────────────────────────────────────────────────────────────┤
-│  5. 🤖 AI Verification Gateway                                     │
-│     ├── OpenRouter validates signal (confidence + explanation)     │
-│     └── Only executes if verdict == "CONFIRMED"                    │
+│  5. 🤖 Execution Routing                                           │
+│     ├── If Conviction ≥ 2: Direct Execution (Bypass AI)            │
+│     └── If Conviction == 1: OpenRouter AI validation required      │
 ├─────────────────────────────────────────────────────────────────────┤
 │  6. 🔥 Order Execution                                             │
 │     ├── Set isolated leverage (3x)                                 │
@@ -108,7 +106,6 @@ Runs full ingestion + signal evaluation without AI verification or order executi
 ├─────────────────────────────────────────────────────────────────────┤
 │  7. 📋 Dashboard & Logging                                         │
 │     ├── Print Live Execution Dashboard (stdout)                    │
-│     ├── Append to production_activity.log                          │
 │     └── Done → next cron tick in 15min                             │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -121,7 +118,7 @@ Runs full ingestion + signal evaluation without AI verification or order executi
 
 - **Go 1.22+** (for compilation)
 - **Bybit account** with API key (read + trade permissions)
-- **OpenRouter API key** (for AI verification)
+- **OpenRouter API key** (for AI verification of Conviction 1 trades)
 - **Git** (for version control)
 
 ### Installation
@@ -129,10 +126,10 @@ Runs full ingestion + signal evaluation without AI verification or order executi
 ```bash
 # Clone the repository
 git clone https://github.com/John4E656F/hermes-trading-bot.git
-cd hermes-trading-bot
+cd hermes-trading-bot/src
 
 # Compile
-go build -o hermes-bot src/*.go
+go build -o hermes-bot .
 ```
 
 ### Configuration
@@ -145,36 +142,22 @@ export BYBIT_API_SECRET="your_bybit_api_secret"
 export OPENROUTER_API_KEY="your_openrouter_api_key"
 ```
 
-Or add them to `~/.bashrc` / `~/.profile` for persistence:
-
-```bash
-echo 'export BYBIT_API_KEY="your_key"' >> ~/.bashrc
-echo 'export BYBIT_API_SECRET="your_secret"' >> ~/.bashrc
-echo 'export OPENROUTER_API_KEY="your_openrouter_key"' >> ~/.bashrc
-source ~/.bashrc
-```
+Or add them to `~/.bashrc` / `~/.profile` for persistence.
 
 ### Usage
 
 ```bash
 # Normal mode — full pipeline with AI verification & execution
-./hermes-bot
+go run .
 
-# Scan mode — diagnostic only, no AI verification, no trades
-./hermes-bot --mode=scan
+# Scan mode — diagnostic only, no AI verification, no trades, dynamic top 100 list
+go run . --mode=scan --watchlist=top100
 
 # Force signal mode — override all indicators for testing
-./hermes-bot --force-signal
+go run . --force-signal
 
 # Position dashboard — live account & open positions
-./hermes-bot --positions
-```
-
-### Crontab Setup (Autonomous Mode)
-
-```bash
-# Every 15 minutes
-*/15 * * * * cd /home/hermes/hermes-trading-bot && ./hermes-bot >> production_activity.log 2>&1
+go run . --positions
 ```
 
 ---
@@ -183,61 +166,22 @@ source ~/.bashrc
 
 ```
 hermes-trading-bot/
-├── .gitignore               # Go, IDE, secret & log exclusions
 ├── README.md                # This file
 ├── go.mod                   # Go module definition
 └── src/
     ├── main.go              # Entry point: flags, ingestion loop, dashboard
     ├── ai_client.go         # OpenRouter AI verification gateway
-    ├── allocator.go         # Strategy allocator: Trend / MeanRev / Neutral
-    ├── check_positions.go   # --positions CLI: live account dashboard
+    ├── allocator.go         # Meta-strategy allocator & conviction scoring
+    ├── volume_profile.go    # S1: Volume Profile & Mean Reversion
+    ├── oi_funding.go        # S2: Open Interest, Funding Rates & Squeeze Setup
+    ├── consolidation.go     # S3: Multi-Week Consolidation Breakout
     ├── client.go            # Bybit V5 REST client (public + HMAC auth)
     ├── executor.go          # Order execution: sizing, brackets, trailing stop
     ├── indicators.go        # Pure‑Go SMA, EMA, RSI, ATR, ADX, Bollinger
-    ├── regime.go            # ADX‑based market regime classifier
     ├── risk_guards.go       # Position guard, volume MA, 7D gain, ranking
     ├── tracker.go           # Trade journal & P&L tracking
-    └── types.go             # Core domain types (Candle, Indicators, Signals)
+    └── types.go             # Core domain types (VP, OI, Consolidation, Signals)
 ```
-
----
-
-## 🧪 Strategy Logic
-
-### Trend‑Following (TRENDING regime, ADX > 25)
-
-```
-BUY  ←  Close > EMA20  AND  SMA50 > SMA200  AND  RSI > 50  AND  Vol > 1.5× 20MA
-HOLD ←  Criteria met BUT volume too weak (awaiting confirmation)
-SELL ←  Close < EMA20  OR  RSI < 40
-```
-
-### Mean Reversion (RANGING regime, ADX < 20)
-
-```
-BUY  ←  Close ≤ Lower Bollinger Band  OR  RSI < 30
-SELL ←  Close ≥ Upper Bollinger Band  OR  RSI > 70
-HOLD ←  Price within neutral distribution
-```
-
-### Mixed Regime (20 ≤ ADX ≤ 25)
-Always HOLD — low‑conviction environments are skipped entirely.
-
----
-
-## 🛡️ Risk Management Summary
-
-| Layer | Detail |
-|---|---|
-| **Capital Guard** | Live balance fetch every cycle; freeze if < $5.00 |
-| **Position Limit** | Max 5 concurrent positions across watchlist |
-| **Volume Filter** | No trend entries without 1.5× volume surge |
-| **AI Gate** | All signals verified by OpenRouter before execution |
-| **Confidence Sizing** | Trade risk scales with AI confidence (0.5% → 1.5%) |
-| **Co‑Ranking** | Only top 3 assets by 7D gain execute per cycle |
-| **Stop Loss** | 2× ATR trailing, fixed bracket |
-| **Take Profit** | 2.5× ATR target (1:2.5 R:R) |
-| **Trailing Stop** | EMA20 distance, activates at TP level |
 
 ---
 
@@ -247,9 +191,9 @@ Always HOLD — low‑conviction environments are skipped entirely.
 - [x] **Phase 2** — Strategy allocator + Bollinger Bands + ADX
 - [x] **Phase 3** — AI verification + live balance + authenticated execution
 - [x] **Phase 4** — Risk guards: volume filter, position cap, trailing stop, co‑ranking
-- [ ] **Phase 5** — Telegram alerts for trade fills / stops / drawdown
-- [ ] **Phase 6** — Multi‑exchange support (Binance, OKX)
-- [ ] **Phase 7** — ML‑enhanced entry timing via local model inference
+- [x] **Phase 5** — Three-Layer Meta-Strategy (Volume Profile, Open Interest, Consolidation)
+- [ ] **Phase 6** — Telegram alerts for trade fills / stops / drawdown
+- [ ] **Phase 7** — Multi‑exchange support (Binance, OKX)
 
 ---
 

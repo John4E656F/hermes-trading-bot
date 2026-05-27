@@ -1,4 +1,5 @@
 package main
+
 import (
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -38,8 +40,14 @@ func main() {
 	// ── Phase 3: Live Capital Guard — fetch wallet balance from Bybit ──
 	liveBalance, err := fetchLiveBalance(client)
 	if err != nil {
-		fmt.Printf("⚠️ Wallet balance fetch failed: %v — using last-known fallback of $51.73\n", err)
-		liveBalance = 51.73 // fallback so the system can still function
+		fmt.Printf("🚨 Wallet balance fetch failed: %v\n", err)
+		if !scanMode {
+			fmt.Println("🚨 [EMERGENCY HALT] Cannot verify live capital. Halting to protect funds.")
+			os.Exit(1)
+		} else {
+			fmt.Println("⚠️ [SCAN] Proceeding with dummy balance of $100.00 for scan mode calculations.")
+			liveBalance = 100.00
+		}
 	}
 
 	fmt.Println("┌─────────────────────────────────────────────────────────────────┐")
@@ -56,7 +64,6 @@ func main() {
 	}
 
 	// ── Build watchlist ──
-	// Default: 13 core assets. Use --watchlist=top100 to scan by volume.
 	var watchlist []string
 	if useTop100 {
 		var err error
@@ -96,43 +103,71 @@ func main() {
 		LiveBalance: liveBalance,
 	}
 
+	// ── Concurrent Data Ingestion Pipeline ──
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	sem := make(chan struct{}, 10) // Concurrency semaphore: max 10 parallel requests to respect Bybit rate limits
+
+	fmt.Printf("⚡ Initiating concurrent ingestion pipeline for %d assets...\n", len(watchlist))
+
 	for _, symbol := range watchlist {
-		fmt.Printf("Analyzing Ingestion Pipeline for %s...\n", symbol)
+		wg.Add(1)
+		go func(sym string) {
+			defer wg.Done()
+			sem <- struct{}{}        // Acquire token
+			defer func() { <-sem }() // Release token
 
-		candles4h, err := client.FetchKlines(symbol, "240", 200)
-		if err != nil {
-			fmt.Printf("⚠️ Error processing 4H data for %s: %v\n", symbol, err)
-			continue
-		}
+			candles4h, err := client.FetchKlines(sym, "240", 200)
+			if err != nil {
+				fmt.Printf("⚠️ Error processing 4H data for %s: %v\n", sym, err)
+				return
+			}
 
-		candles1d, err := client.FetchKlines(symbol, "D", 200)
-		if err != nil {
-			fmt.Printf("⚠️ Error processing 1D data for %s: %v\n", symbol, err)
-			continue
-		}
+			candles1d, err := client.FetchKlines(sym, "D", 200)
+			if err != nil {
+				fmt.Printf("⚠️ Error processing 1D data for %s: %v\n", sym, err)
+				return
+			}
 
-		if len(candles4h) == 0 || len(candles1d) == 0 {
-			fmt.Printf("⚠️ [%s] Empty data packet received from exchange — skipping asset.\n", symbol)
-			continue
-		}
+			if len(candles4h) == 0 || len(candles1d) == 0 {
+				return
+			}
 
-		ind4h := ComputeAllIndicators(candles4h)
-		ind4h.BBands = CalculateBollingerBands(candles4h, 20, 2.0)
+			ind4h := ComputeAllIndicators(candles4h)
+			ind4h.BBands = CalculateBollingerBands(candles4h, 20, 2.0)
 
-		ind1d := ComputeAllIndicators(candles1d)
-		ind1d.ADX14 = CalculateADX(candles1d, 14)
+			ind1d := ComputeAllIndicators(candles1d)
+			ind1d.ADX14 = CalculateADX(candles1d, 14)
 
-		latestPrice := candles4h[len(candles4h)-1].Close
+			latestPrice := candles4h[len(candles4h)-1].Close
 
-		marketData.Assets[symbol] = &AssetSnapshot{
-			Symbol:       symbol,
-			CurrentPrice: latestPrice,
-			Snap4h:       TimeframeSnapshot{Interval: "240", Candles: candles4h, Indicators: ind4h},
-			Snap1d:       TimeframeSnapshot{Interval: "D", Candles: candles1d, Indicators: ind1d},
-		}
+			// Fetch OI + Funding (public endpoints, no auth)
+			oiRaw, _ := client.FetchOpenInterest(sym)
+			fundingRaw, _ := client.FetchFundingHistory(sym)
 
-		time.Sleep(200 * time.Millisecond)
+			// Compute derivatives
+			vp := ComputeVolumeProfile(candles1d, 30)
+			oiSnap := ParseAndComputeOI(oiRaw)
+			fundSnap := ParseAndComputeFunding(fundingRaw)
+			consol := DetectConsolidation(candles1d, 21, 5.0)
+
+			mu.Lock()
+			marketData.Assets[sym] = &AssetSnapshot{
+				Symbol:       sym,
+				CurrentPrice: latestPrice,
+				Snap4h:       TimeframeSnapshot{Interval: "240", Candles: candles4h, Indicators: ind4h},
+				Snap1d:       TimeframeSnapshot{Interval: "D", Candles: candles1d, Indicators: ind1d},
+				VP:           vp,
+				OI:           oiSnap,
+				Funding:      fundSnap,
+				Consolidation: consol,
+			}
+			mu.Unlock()
+		}(symbol)
 	}
+
+	wg.Wait() // Block until all concurrent workers finish
+	fmt.Println("✅ Ingestion complete.")
 
 	printAndExecuteSignals(marketData, aiClient, executor, forceSignalToggle, watchlist, freezeEntries, scanMode)
 
@@ -142,8 +177,10 @@ func main() {
 	}
 
 	// Compile dynamic telemetry reports directly from live endpoints
-	PrintActivePositionsQueries(client)
-	PrintRecentClosedPnLSummary(client)
+	if !scanMode {
+		PrintActivePositionsQueries(client)
+		PrintRecentClosedPnLSummary(client)
+	}
 }
 
 // fetchLiveBalance calls Bybit's private wallet-balance endpoint and extracts
@@ -211,8 +248,8 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 	fmt.Println("=========================================================================================")
 	fmt.Printf("💰 Live Bybit Balance: $%.2f USDT\n", data.LiveBalance)
 	fmt.Println("=========================================================================================")
-	fmt.Printf("%-10s | %-12s | %-10s | %-22s | %-6s\n", "SYMBOL", "REGIME (1D)", "ADX (1D)", "ACTIVE STRATEGY", "SIGNAL")
-fmt.Println("-----------------------------------------------------------------------------------------")
+	fmt.Printf("%-10s | %-12s | %-10s | %-22s | %-6s\n", "SYMBOL", "CONVICTION", "ADX (1D)", "ACTIVE STRATEGY", "SIGNAL")
+	fmt.Println("-----------------------------------------------------------------------------------------")
 
 	// ── Pass 1: Collect all actionable signals (BUY + SELL) with 7D gain ──
 	var buyCandidates, sellCandidates []RankedSignal
@@ -233,21 +270,13 @@ fmt.Println("-------------------------------------------------------------------
 		if forceActive {
 			sig.Action = ACTION_BUY
 			sig.Reason = "FORCED DIAGNOSTIC SIMULATION OVERRIDE"
+			sig.Conviction = 1
+			sig.Confidence = 0.60
 		}
 
-		var regimeStr string
-		switch sig.Regime {
-		case REGIME_TRENDING:
-			regimeStr = "TRENDING 📈"
-		case REGIME_RANGING:
-			regimeStr = "RANGING ↔️"
-		default:
-			regimeStr = "MIXED 🔄"
-		}
-
-		fmt.Printf("%-10s | %-12s | %-10.2f | %-22s | %-6s%s\n",
+		fmt.Printf("%-10s | %-12d | %-10.2f | %-22s | %-6s%s\n",
 			asset.Symbol,
-			regimeStr,
+			sig.Conviction,
 			asset.Snap1d.Indicators.ADX14,
 			sig.Strategy,
 			sig.Action,
@@ -275,7 +304,7 @@ fmt.Println("-------------------------------------------------------------------
 		}
 
 		if sig.Action == ACTION_HOLD {
-			fmt.Println("   🛡️ AI Gateway Status: [IDLE] (No API costs incurred while Local Signal is HOLD)\n")
+			fmt.Println("   🛡️ AI Gateway Status: [IDLE] (No API costs incurred while Local Signal is HOLD)")
 		}
 	}
 
@@ -285,7 +314,6 @@ fmt.Println("-------------------------------------------------------------------
 		fmt.Println("  🔍 SCAN: VOLUME PROFILE + RELATIVE STRENGTH REPORT")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-		// Volume diagnostics for all candidates
 		allCandidates := append(buyCandidates, sellCandidates...)
 		fmt.Printf("%-10s %-12s %-10s  %-22s  %-10s\n", "SYMBOL", "REGIME", "ADX(1D)", "VOLUME SURGE", "7D GAIN")
 		for _, c := range allCandidates {
@@ -302,7 +330,6 @@ fmt.Println("-------------------------------------------------------------------
 			fmt.Printf("   Latest Vol: %.0f  |  20-MA Vol: %.0f  |  Ratio: %.2fx\n", latestVol, avgVol, latestVol/avgVol)
 		}
 
-		// Ranked top longs
 		topLongs := RankSignalsByGain(buyCandidates, 3)
 		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println("  🏆 TOP LONGS (Ranked by 7D Gain)")
@@ -317,7 +344,6 @@ fmt.Println("-------------------------------------------------------------------
 			fmt.Println("  (No BUY signals — market lacking strength leaders)")
 		}
 
-		// Ranked top shorts
 		topShorts := RankSignalsByLowestGain(sellCandidates, 3)
 		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println("  🐻 TOP SHORTS (Ranked by Weakest 7D Performance)")
@@ -335,7 +361,7 @@ fmt.Println("-------------------------------------------------------------------
 		fmt.Println("\n🔍 SCAN COMPLETE — No orders routed. Use normal mode to execute.")
 
 	} else if freezeEntries {
-		fmt.Println("\n❄️ ENTRY FREEZE: Max positions reached. All BUY signals are dashboard-only — no orders placed.\n")
+		fmt.Println("\n❄️ ENTRY FREEZE: Max positions reached. All BUY signals are dashboard-only — no orders placed.")
 	} else {
 		// Merge ranked longs + ranked shorts, cap combined at 3
 		topLongs := RankSignalsByGain(buyCandidates, 3)
@@ -346,7 +372,6 @@ fmt.Println("-------------------------------------------------------------------
 
 		// Sort merged pool so strongest signals execute first
 		sort.Slice(filtered, func(i, j int) bool {
-			// Higher absolute 7D change = stronger signal regardless of direction
 			return math.Abs(filtered[i].Gain7D) > math.Abs(filtered[j].Gain7D)
 		})
 
@@ -363,58 +388,20 @@ fmt.Println("-------------------------------------------------------------------
 		fmt.Println()
 
 		// ── Pass 3: Local confidence + AI verify + execute filtered set ──
-		// High-confidence signals bypass AI entirely — saves OpenRouter costs and
-		// prevents the AI from rejecting valid signals with backwards reasoning.
 		for _, c := range filtered {
 			asset := c.Asset
 			sig := c.Signal
 
 			// ── Local confidence assessment ──
 			localConfident := false
-			localConf := 0.70
-			rsi := asset.Snap4h.Indicators.RSI14
-			adx := asset.Snap1d.Indicators.ADX14
-
-			switch sig.Action {
-			case ACTION_BUY:
-				switch sig.Regime {
-				case REGIME_RANGING:
-					// Mean reversion BUY: RSI < 42 → oversold bounce territory
-					if rsi < 42 {
-						localConfident = true
-						localConf = 0.85
-					}
-				case REGIME_TRENDING:
-					// Trend BUY: RSI > 55 + ADX > 25 → momentum intact
-					if rsi > 55 && adx > 25 {
-						localConfident = true
-						localConf = 0.85
-					}
-					// Very strong trend: ADX > 40 → trend IS the signal
-					if adx > 40 {
-						localConfident = true
-						localConf = 0.90
-					}
-				}
-			case ACTION_SELL:
-				switch sig.Regime {
-				case REGIME_TRENDING:
-					// Trend SELL: RSI < 45 + ADX > 25 → momentum broken
-					if rsi < 45 && adx > 25 {
-						localConfident = true
-						localConf = 0.80
-					}
-					// Very strong downtrend: ADX > 40
-					if adx > 40 {
-						localConfident = true
-						localConf = 0.85
-					}
-				}
+			
+			if sig.Conviction >= 2 {
+				localConfident = true
 			}
 
 			if localConfident {
-				fmt.Printf("💡 [%s] Local confidence=%.0f%% — bypassing AI, executing directly.\n", asset.Symbol, localConf*100)
-				err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice, asset.Snap4h.Indicators.ATR14, localConf, asset.Snap4h.Candles)
+				fmt.Printf("💡 [%s] Local confidence=%.0f%% (Conviction %d) — bypassing AI, executing directly.\n", asset.Symbol, sig.Confidence*100, sig.Conviction)
+				err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice, asset.Snap4h.Indicators.ATR14, sig.Confidence, asset.Snap4h.Candles)
 				if err != nil {
 					fmt.Printf("   ❌ Order Execution Failure: %v\n\n", err)
 				}
@@ -437,7 +424,7 @@ fmt.Println("-------------------------------------------------------------------
 					fmt.Printf("   ❌ Order Execution Failure: %v\n\n", err)
 				}
 			} else {
-				fmt.Println("   🛡️ Signal REJECTED by AI risk layer. Order routing halted.\n")
+				fmt.Println("   🛡️ Signal REJECTED by AI risk layer. Order routing halted.")
 			}
 		}
 	}
@@ -445,8 +432,6 @@ fmt.Println("-------------------------------------------------------------------
 }
 
 // ── 4-Hour Boundary Check ─────────────────────────────────────────────
-// Returns true at the start of each 4-hour candle (00/04/08/12/16/20 UTC)
-// during the first 15 minutes of the new block.
 func is4HourBoundary() bool {
 	now := time.Now().UTC()
 	hour := now.Hour()
@@ -455,8 +440,6 @@ func is4HourBoundary() bool {
 }
 
 // ── 4-Hour Macro Snapshot Telegram Broadcast ──────────────────────────
-// Compiles a structured overview of the entire asset matrix and sends it
-// via Telegram. Runs even when the circuit breaker is active.
 func sendTelegramSnapshot(client *BybitClient, data MarketData, watchlist []string, freezeEntries bool) {
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
 	chatID := os.Getenv("TELEGRAM_CHAT_ID")
@@ -465,19 +448,16 @@ func sendTelegramSnapshot(client *BybitClient, data MarketData, watchlist []stri
 		return
 	}
 
-	// Re-fetch live balance to get the freshest number
 	liveBalance, err := fetchLiveBalance(client)
 	if err != nil {
 		liveBalance = data.LiveBalance
 	}
 
-	// Count open positions
 	openPosCount, err := fetchOpenPositionCount(client, watchlist)
 	if err != nil {
 		openPosCount = -1
 	}
 
-	// Classify assets: trending (ADX > 25) vs ranging/mixed (ADX <= 25)
 	var trending, ranging []string
 	var candidates []RankedSignal
 
@@ -496,7 +476,6 @@ func sendTelegramSnapshot(client *BybitClient, data MarketData, watchlist []stri
 			ranging = append(ranging, line)
 		}
 
-		// Collect candidates for relative strength ranking
 		gain7d := Compute7DayGain(asset.Snap1d.Candles)
 		candidates = append(candidates, RankedSignal{
 			Asset:  asset,
@@ -504,7 +483,6 @@ func sendTelegramSnapshot(client *BybitClient, data MarketData, watchlist []stri
 		})
 	}
 
-	// Top 3 by relative strength
 	top3 := RankSignalsByGain(candidates, 3)
 	var top3Str []string
 	for i, c := range top3 {
@@ -515,7 +493,6 @@ func sendTelegramSnapshot(client *BybitClient, data MarketData, watchlist []stri
 		top3Label = strings.Join(top3Str, ", ")
 	}
 
-	// Circuit breaker status
 	cbStatus := "🟢 GREEN"
 	if liveBalance < 5.00 {
 		cbStatus = "🔴 RED"
@@ -526,7 +503,6 @@ func sendTelegramSnapshot(client *BybitClient, data MarketData, watchlist []stri
 		posLabel = "?"
 	}
 
-	// Compile the message
 	trendingBlock := "• None"
 	if len(trending) > 0 {
 		trendingBlock = strings.Join(trending, "\n")
@@ -552,7 +528,6 @@ func sendTelegramSnapshot(client *BybitClient, data MarketData, watchlist []stri
 		cbStatus,
 	)
 
-	// Send via Telegram
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
 	form := url.Values{}
 	form.Set("chat_id", chatID)
