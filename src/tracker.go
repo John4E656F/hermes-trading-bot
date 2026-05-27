@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type PositionReport struct {
@@ -17,11 +18,7 @@ type PositionReport struct {
 
 // PrintActivePositionsQueries reads live open derivatives contract exposure from Bybit V5
 func PrintActivePositionsQueries(client *BybitClient) {
-	payload := map[string]interface{}{
-		"category": "linear", // Track our Isolated Perpetual Futures contracts
-	}
-
-	respBytes, err := client.PostPrivateRequest("/v5/position/list", payload)
+	respBytes, err := client.GetPrivateRequest("/v5/position/list?category=linear")
 	if err != nil {
 		fmt.Printf("⚠️ Failed pulling open positions matrix: %v\n", err)
 		return
@@ -63,12 +60,7 @@ func PrintActivePositionsQueries(client *BybitClient) {
 
 // PrintRecentClosedPnLSummary prints historical finalized trades (Wins/Losses)
 func PrintRecentClosedPnLSummary(client *BybitClient) {
-	payload := map[string]interface{}{
-		"category": "linear",
-		"limit":    3, // Fetch last 3 settled items
-	}
-
-	respBytes, err := client.PostPrivateRequest("/v5/position/closed-pnl", payload)
+	respBytes, err := client.GetPrivateRequest("/v5/position/closed-pnl?category=linear&limit=3")
 	if err != nil {
 		return
 	}
@@ -92,7 +84,7 @@ func PrintRecentClosedPnLSummary(client *BybitClient) {
 		fmt.Println("=========================================================================================")
 		for _, trade := range res.Result.List {
 			verdict := "🟢 WIN"
-			if string(trade.ClosedPnL[0]) == "-" {
+			if strings.HasPrefix(trade.ClosedPnL, "-") {
 				verdict = "🔴 LOSS"
 			}
 			fmt.Printf("[%s] Asset: %-8s | Action: Closed %-4s (%sx leverage)\n", verdict, trade.Symbol, trade.Side, trade.Leverage)

@@ -59,21 +59,12 @@ func (ai *AIClient) ValidateSignal(sig StrategySignal, price float64, rsi float6
 
 	// 1. Compress indicators to minimize token spending completely
 	compactContext := fmt.Sprintf(
-		"Symbol:%s|Price:%.2f|Regime:%s|Strat:%s|Action:%s|RSI:%.1f|ATR:%.2f",
-		sig.Symbol, price, sig.Regime, sig.Strategy, sig.Action, rsi, atr,
+		"Symbol:%s|Price:%.2f|Strat:%s|Action:%s|Conviction:%d|RSI:%.1f|ATR:%.2f",
+		sig.Symbol, price, sig.Strategy, sig.Action, sig.Conviction, rsi, atr,
 	)
 
 // 2. Build system directives to enforce zero-conversational output
-		// Strategy-specific RSI rules:
-		//   - Trend-following momentum (BUY or SELL in TRENDING regime):
-		//     RSI 45-75 = NORMAL trend confirmation, NOT a reversal signal.
-		//     Only reject if RSI < 35 (trend dying) or RSI > 85 (extremely overbought).
-		//   - Mean reversion (BUY in RANGING regime):
-		//     RSI < 35 = strong buy signal. RSI 35-45 = acceptable.
-		//   - Mean reversion (SELL in RANGING regime):
-		//     RSI > 65 = strong sell signal. RSI 55-65 = acceptable.
-		//   - ATR = 0: valid rejection (dead market).
-		systemPrompt := "You are Hermes Risk Filter. Use strategy-specific RSI rules: Trend-following (STRAT=Trend*): RSI 45-75 is NORMAL, not a reversal signal. Mean reversion (STRAT=Mean*): RSI<35=buy, RSI>65=sell. ATR=0=reject. Return JSON: {\\\"verdict\\\":\\\"CONFIRMED\\\"|\\\"REJECTED\\\",\\\"confidence\\\":0.0-1.0,\\\"explanation\\\":\\\"1-sentence reason\\\"}. No markdown, no wrappers."
+		systemPrompt := "You are Hermes Risk Filter. Validate the trade based on strategy: Mean Reversion (S1) expects RSI<35 for buy, RSI>65 for sell. Squeeze (S2) expects extreme OI/funding. Breakout (S3) expects volatility. Reject if ATR=0. Return JSON: {\\\"verdict\\\":\\\"CONFIRMED\\\"|\\\"REJECTED\\\",\\\"confidence\\\":0.0-1.0,\\\"explanation\\\":\\\"1-sentence reason\\\"}. No markdown, no wrappers."
 
 	payload := OpenRouterRequest{
 		Model: "google/gemini-2.5-flash", // Using high-speed ultra-cheap flash structure via OpenRouter

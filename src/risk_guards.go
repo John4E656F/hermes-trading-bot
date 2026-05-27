@@ -42,7 +42,8 @@ func fetchOpenPositionCount(client *BybitClient, watchlist []string) (int, error
 
 	count := 0
 	for _, pos := range resp.Result.List {
-		if watchSet[pos.Symbol] && pos.Size != "0" {
+		// FIXED: Check for both "0" and empty string "" to accurately count active positions
+		if watchSet[pos.Symbol] && pos.Size != "0" && pos.Size != "" {
 			count++
 		}
 	}

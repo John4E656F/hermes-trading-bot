@@ -24,11 +24,10 @@ func CalculateEMA(candles []Candle, period int) float64 {
 	}
 	multiplier := 2.0 / (float64(period) + 1.0)
 	
-	// Seed with SMA
-	currentEMA := CalculateSMA(candles[:len(candles)-period+1], period)
+	// Seed with SMA of the first `period` candles
+	currentEMA := CalculateSMA(candles[:period], period)
 	
-	startIdx := len(candles) - period + 1
-	for i := startIdx; i < len(candles); i++ {
+	for i := period; i < len(candles); i++ {
 		currentEMA = ((candles[i].Close - currentEMA) * multiplier) + currentEMA
 	}
 	return currentEMA

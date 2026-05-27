@@ -1,23 +1,16 @@
 package main
 
-import (
-	"fmt"
-)
-
-type SignalAction string
-
-const (
-	ACTION_BUY  SignalAction = "BUY"
-	ACTION_SELL SignalAction = "SELL"
-	ACTION_HOLD SignalAction = "HOLD"
-)
-
 type StrategySignal struct {
-	Symbol   string
-	Regime   MarketRegime
-	Strategy string
-	Action   SignalAction
-	Reason   string
+	Symbol     string
+	Regime     MarketRegime // retained for dashboard display
+	Strategy   string       // "S1: Mean Reversion" / "S2: OI Squeeze" / "S3: Breakout" / "META: Liquidation Breakout"
+	Action     SignalAction
+	Reason     string
+	Conviction int     // 1, 2, or 3
+	Confidence float64 // mapped from conviction
+	S1         S1Signal
+	S2         S2Signal
+	S3         S3Signal
 }
 
 func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
@@ -26,65 +19,84 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 
 	snap4h := asset.Snap4h
 	latestPrice := snap4h.Candles[len(snap4h.Candles)-1].Close
-	ind := snap4h.Indicators
+	ema20 := snap4h.Indicators.EMA20
+
+	avgVol := CalculateVolumeMA(snap4h.Candles, 20)
+	latestVol := snap4h.Candles[len(snap4h.Candles)-1].Volume
+
+	s1 := EvaluateS1MeanReversion(latestPrice, asset.VP)
+	s2 := EvaluateS2Squeeze(asset.OI, asset.Funding, latestPrice, ema20)
+	s3 := EvaluateS3Breakout(latestPrice, asset.Consolidation, latestVol, avgVol)
 
 	signal := StrategySignal{
 		Symbol: asset.Symbol,
 		Regime: currentRegime,
+		Action: ACTION_HOLD,
+		S1:     s1,
+		S2:     s2,
+		S3:     s3,
 	}
 
-	switch currentRegime {
-	case REGIME_TRENDING:
-		signal.Strategy = "Trend-Following Momentum"
+	buyCount := 0
+	sellCount := 0
 
-		// Volume profile validation: latest closed candle must have
-		// adequate volume relative to the 20-MA average.
-		// Threshold is ADX-dependent — very strong trends (ADX > 40)
-		// need no volume confirmation; the trend itself is the signal.
-		avgVol := CalculateVolumeMA(snap4h.Candles, 20)
-		latestVol := snap4h.Candles[len(snap4h.Candles)-1].Volume
-		volRatio := latestVol / avgVol
-		var volOk bool
-		var volMsg string
-		if dailyADX > 40 {
-			volOk = true
-			volMsg = fmt.Sprintf("Strong trend (ADX %.0f>40) bypasses volume gate (ratio=%.2fx).", dailyADX, volRatio)
-		} else {
-			volOk = volRatio >= 1.5
-			volMsg = fmt.Sprintf("4H volume ratio=%.2fx (needs 1.5x)", volRatio)
+	if s1.Active {
+		if s1.Action == ACTION_BUY {
+			buyCount++
+		} else if s1.Action == ACTION_SELL {
+			sellCount++
 		}
-
-		if latestPrice > ind.EMA20 && ind.SMA50 > ind.SMA200 && ind.RSI14 > 50 && volOk {
-			signal.Action = ACTION_BUY
-			signal.Reason = "Price above EMA20, Golden Cross intact, RSI strong. " + volMsg
-		} else if latestPrice > ind.EMA20 && ind.SMA50 > ind.SMA200 && ind.RSI14 > 50 && !volOk {
-			signal.Action = ACTION_HOLD
-			signal.Reason = "Trend criteria met but " + volMsg + " below threshold."
-		} else if latestPrice < ind.EMA20 || ind.RSI14 < 40 {
-			signal.Action = ACTION_SELL
-			signal.Reason = "Price broken below major 20 EMA threshold or momentum fully collapsed."
-		} else {
-			signal.Action = ACTION_HOLD
-			signal.Reason = "Trend is active but asset is in macro consolidation phase."
+	}
+	if s2.Active {
+		if s2.Action == ACTION_BUY {
+			buyCount++
+		} else if s2.Action == ACTION_SELL {
+			sellCount++
 		}
-
-	case REGIME_RANGING:
-		signal.Strategy = "Statistical Mean Reversion"
-		if latestPrice <= ind.BBands.Lower || ind.RSI14 < 30 {
-			signal.Action = ACTION_BUY
-			signal.Reason = "Asset swept outer structural Bollinger Band or reached extreme statistical oversold levels."
-		} else if latestPrice >= ind.BBands.Upper || ind.RSI14 > 70 {
-			signal.Action = ACTION_SELL
-			signal.Reason = "Asset tag reached upper Bollinger boundary or achieved standard exhaustion limits."
-		} else {
-			signal.Action = ACTION_HOLD
-			signal.Reason = "Price trading safely within neutral distribution boundaries."
+	}
+	if s3.Active {
+		if s3.Action == ACTION_BUY {
+			buyCount++
+		} else if s3.Action == ACTION_SELL {
+			sellCount++
 		}
+	}
 
-	default:
-		signal.Strategy = "Regime Neutral Filter"
+	if buyCount > sellCount && buyCount > 0 {
+		signal.Action = ACTION_BUY
+		signal.Conviction = buyCount
+	} else if sellCount > buyCount && sellCount > 0 {
+		signal.Action = ACTION_SELL
+		signal.Conviction = sellCount
+	} else {
 		signal.Action = ACTION_HOLD
-		signal.Reason = "ADX signals a mixed, low-conviction environment. Standing aside to protect core capital."
+		signal.Conviction = 0
+		signal.Confidence = 0.0
+		signal.Reason = "No clear alignment across strategies."
+		return signal
+	}
+
+	switch signal.Conviction {
+	case 1:
+		signal.Confidence = 0.60
+		if s1.Active && s1.Action == signal.Action {
+			signal.Strategy = "S1: Mean Reversion"
+			signal.Reason = s1.Reason
+		} else if s2.Active && s2.Action == signal.Action {
+			signal.Strategy = "S2: OI Squeeze"
+			signal.Reason = s2.Reason
+		} else if s3.Active && s3.Action == signal.Action {
+			signal.Strategy = "S3: Breakout"
+			signal.Reason = s3.Reason
+		}
+	case 2:
+		signal.Confidence = 0.75
+		signal.Strategy = "Double Alignment"
+		signal.Reason = "Two independent strategies aligned, providing elevated probability."
+	case 3:
+		signal.Confidence = 0.90
+		signal.Strategy = "META: Liquidation Breakout"
+		signal.Reason = "Perfect meta-alignment: Consolidation breakout + OI squeeze + Value Area deviation."
 	}
 
 	return signal

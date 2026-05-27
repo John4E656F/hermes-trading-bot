@@ -119,6 +119,30 @@ func (c *BybitClient) GetPrivateRequest(endpoint string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
+// FetchOpenInterest retrieves public open interest history for a symbol.
+// Bybit V5 requires: GET /v5/market/open-interest
+func (c *BybitClient) FetchOpenInterest(symbol string) ([]byte, error) {
+	url := fmt.Sprintf("%s/v5/market/open-interest?category=linear&symbol=%s&intervalTime=4h&limit=48", c.BaseURL, symbol)
+	resp, err := c.HTTPClient.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
+// FetchFundingHistory retrieves public funding rate history for a symbol.
+// Bybit V5 requires: GET /v5/market/funding/history
+func (c *BybitClient) FetchFundingHistory(symbol string) ([]byte, error) {
+	url := fmt.Sprintf("%s/v5/market/funding/history?category=linear&symbol=%s&limit=30", c.BaseURL, symbol)
+	resp, err := c.HTTPClient.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
 // FetchTopSymbols retrieves the top N USDT perpetual symbols by 24h turnover.
 // Uses the public tickers endpoint (no auth required).
 func (c *BybitClient) FetchTopSymbols(n int) ([]string, error) {
