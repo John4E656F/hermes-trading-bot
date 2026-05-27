@@ -362,10 +362,65 @@ fmt.Println("-------------------------------------------------------------------
 		}
 		fmt.Println()
 
-		// ── Pass 3: AI verify + execute filtered set ──
+		// ── Pass 3: Local confidence + AI verify + execute filtered set ──
+		// High-confidence signals bypass AI entirely — saves OpenRouter costs and
+		// prevents the AI from rejecting valid signals with backwards reasoning.
 		for _, c := range filtered {
 			asset := c.Asset
 			sig := c.Signal
+
+			// ── Local confidence assessment ──
+			localConfident := false
+			localConf := 0.70
+			rsi := asset.Snap4h.Indicators.RSI14
+			adx := asset.Snap1d.Indicators.ADX14
+
+			switch sig.Action {
+			case ACTION_BUY:
+				switch sig.Regime {
+				case REGIME_RANGING:
+					// Mean reversion BUY: RSI < 42 → oversold bounce territory
+					if rsi < 42 {
+						localConfident = true
+						localConf = 0.85
+					}
+				case REGIME_TRENDING:
+					// Trend BUY: RSI > 55 + ADX > 25 → momentum intact
+					if rsi > 55 && adx > 25 {
+						localConfident = true
+						localConf = 0.85
+					}
+					// Very strong trend: ADX > 40 → trend IS the signal
+					if adx > 40 {
+						localConfident = true
+						localConf = 0.90
+					}
+				}
+			case ACTION_SELL:
+				switch sig.Regime {
+				case REGIME_TRENDING:
+					// Trend SELL: RSI < 45 + ADX > 25 → momentum broken
+					if rsi < 45 && adx > 25 {
+						localConfident = true
+						localConf = 0.80
+					}
+					// Very strong downtrend: ADX > 40
+					if adx > 40 {
+						localConfident = true
+						localConf = 0.85
+					}
+				}
+			}
+
+			if localConfident {
+				fmt.Printf("💡 [%s] Local confidence=%.0f%% — bypassing AI, executing directly.\n", asset.Symbol, localConf*100)
+				err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice, asset.Snap4h.Indicators.ATR14, localConf, asset.Snap4h.Candles)
+				if err != nil {
+					fmt.Printf("   ❌ Order Execution Failure: %v\n\n", err)
+				}
+				continue
+			}
+
 			fmt.Printf("💡 [%s] Active trade setup found! Initiating OpenRouter AI Verification layer...\n", asset.Symbol)
 			aiResp, err := ai.ValidateSignal(sig, asset.CurrentPrice, asset.Snap4h.Indicators.RSI14, asset.Snap4h.Indicators.ATR14)
 			if err != nil {

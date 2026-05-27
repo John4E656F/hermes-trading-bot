@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strconv"
 )
 
 type SignalAction string
@@ -42,7 +41,6 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		// adequate volume relative to the 20-MA average.
 		// Threshold is ADX-dependent — very strong trends (ADX > 40)
 		// need no volume confirmation; the trend itself is the signal.
-		dailyADX := snap1d.Indicators.ADX14
 		avgVol := CalculateVolumeMA(snap4h.Candles, 20)
 		latestVol := snap4h.Candles[len(snap4h.Candles)-1].Volume
 		volRatio := latestVol / avgVol
