@@ -12,7 +12,7 @@ import (
 // symbols appear in our watchlist.  Returns the count so the caller can
 // enforce the max-concurrent-exposure freeze (5/5).
 func fetchOpenPositionCount(client *BybitClient, watchlist []string) (int, error) {
-	respBytes, err := client.GetPrivateRequest("/v5/position/list?category=linear")
+	respBytes, err := client.GetPrivateRequest("/v5/position/list?category=linear&settleCoin=USDT")
 	if err != nil {
 		return 0, fmt.Errorf("position list http: %w", err)
 	}

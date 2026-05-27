@@ -12,9 +12,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	// Attempt to load .env file if present, and overload any shell variables
+	_ = godotenv.Overload("../.env")
+
 	fmt.Println("🚀 Hermes Production Engine Initializing...")
 
 	// Check for testing argument flags
