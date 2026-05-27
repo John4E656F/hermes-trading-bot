@@ -256,7 +256,6 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 	fmt.Printf("%-10s | %-12s | %-10s | %-22s | %-6s\n", "SYMBOL", "CONVICTION", "ADX (1D)", "ACTIVE STRATEGY", "SIGNAL")
 	fmt.Println("-----------------------------------------------------------------------------------------")
 
-	// ── Pass 1: Collect all actionable signals (BUY + SELL) with 7D gain ──
 	var buyCandidates, sellCandidates []RankedSignal
 	freezeBanner := ""
 	if freezeEntries {
@@ -271,7 +270,6 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 
 		sig := EvaluateMarketSnapshot(asset)
 
-		// If simulation command override is turned on, force a buy path setup
 		if forceActive {
 			sig.Action = ACTION_BUY
 			sig.Reason = "FORCED DIAGNOSTIC SIMULATION OVERRIDE"
@@ -289,20 +287,17 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 		)
 		fmt.Printf("   ┗━ Local Reason: %s\n", sig.Reason)
 
+		gain7d := Compute7DayGain(asset.Snap1d.Candles)
+
 		if sig.Action == ACTION_BUY {
-			gain7d := Compute7DayGain(asset.Snap1d.Candles)
 			buyCandidates = append(buyCandidates, RankedSignal{
 				Asset:  asset,
-				Signal: sig,
 				Gain7D: gain7d,
 			})
 			fmt.Printf("   📊 7-Day Strength: %+.2f%%\n", gain7d)
-		}
-		if sig.Action == ACTION_SELL {
-			gain7d := Compute7DayGain(asset.Snap1d.Candles)
+		} else if sig.Action == ACTION_SELL {
 			sellCandidates = append(sellCandidates, RankedSignal{
 				Asset:  asset,
-				Signal: sig,
 				Gain7D: gain7d,
 			})
 			fmt.Printf("   📉 7-Day Weakness: %+.2f%%\n", gain7d)
@@ -313,14 +308,13 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 		}
 	}
 
-	// ── Pass 2: Rank each pool by contextual criteria, cap at 3 per side ──
 	if scanMode {
 		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println("  🔍 SCAN: VOLUME PROFILE + RELATIVE STRENGTH REPORT")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 		allCandidates := append(buyCandidates, sellCandidates...)
-		fmt.Printf("%-10s %-12s %-10s  %-22s  %-10s\n", "SYMBOL", "REGIME", "ADX(1D)", "VOLUME SURGE", "7D GAIN")
+		fmt.Printf("%-10s %-12s %-10s  %-22s  %-10s\n", "SYMBOL", "ADX(1D)", "VOLUME SURGE", "7D GAIN")
 		for _, c := range allCandidates {
 			asset := c.Asset
 			avgVol := CalculateVolumeMA(asset.Snap4h.Candles, 20)
@@ -330,8 +324,8 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 			if surge {
 				surgeLabel = "✅ YES"
 			}
-			fmt.Printf("%-10s %-12s %-10.2f  %-22s  %+.2f%%\n",
-				asset.Symbol, c.Signal.Regime.String(), asset.Snap1d.Indicators.ADX14, surgeLabel, c.Gain7D)
+			fmt.Printf("%-10s %-10.2f  %-22s  %+.2f%%\n",
+				asset.Symbol, asset.Snap1d.Indicators.ADX14, surgeLabel, c.Gain7D)
 			fmt.Printf("   Latest Vol: %.0f  |  20-MA Vol: %.0f  |  Ratio: %.2fx\n", latestVol, avgVol, latestVol/avgVol)
 		}
 
@@ -340,10 +334,8 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 		fmt.Println("  🏆 TOP LONGS (Ranked by 7D Gain)")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		if len(topLongs) > 0 {
-			fmt.Printf("%-3s %-10s %-14s %-12s %-10s\n", "RNK", "SYMBOL", "STRATEGY", "REGIME", "7D GAIN")
 			for i, c := range topLongs {
-				fmt.Printf("#%-2d %-10s %-14s %-12s %+.2f%%\n",
-					i+1, c.Asset.Symbol, c.Signal.Strategy, c.Signal.Regime.String(), c.Gain7D)
+				fmt.Printf("#%-2d %-10s %+.2f%%\n", i+1, c.Asset.Symbol, c.Gain7D)
 			}
 		} else {
 			fmt.Println("  (No BUY signals — market lacking strength leaders)")
@@ -354,57 +346,38 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 		fmt.Println("  🐻 TOP SHORTS (Ranked by Weakest 7D Performance)")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		if len(topShorts) > 0 {
-			fmt.Printf("%-3s %-10s %-14s %-12s %-10s\n", "RNK", "SYMBOL", "STRATEGY", "REGIME", "7D GAIN")
 			for i, c := range topShorts {
-				fmt.Printf("#%-2d %-10s %-14s %-12s %+.2f%%\n",
-					i+1, c.Asset.Symbol, c.Signal.Strategy, c.Signal.Regime.String(), c.Gain7D)
+				fmt.Printf("#%-2d %-10s %+.2f%%\n", i+1, c.Asset.Symbol, c.Gain7D)
 			}
 		} else {
 			fmt.Println("  (No SELL signals — no assets showing material weakness)")
 		}
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		fmt.Println("\n🔍 SCAN COMPLETE — No orders routed. Use normal mode to execute.")
+		fmt.Println("\n🔍 SCAN COMPLETE — No orders routed.")
 
 	} else if freezeEntries {
-		fmt.Println("\n❄️ ENTRY FREEZE: Max positions reached. All BUY signals are dashboard-only — no orders placed.")
+		fmt.Println("\n❄️ ENTRY FREEZE: Max positions reached. All signals are dashboard-only — no orders placed.")
 	} else {
-		// Merge ranked longs + ranked shorts, cap combined at 3
 		topLongs := RankSignalsByGain(buyCandidates, 3)
 		topShorts := RankSignalsByLowestGain(sellCandidates, 3)
+
 		var filtered []RankedSignal
 		filtered = append(filtered, topLongs...)
 		filtered = append(filtered, topShorts...)
 
-		// Sort merged pool so strongest signals execute first
 		sort.Slice(filtered, func(i, j int) bool {
 			return math.Abs(filtered[i].Gain7D) > math.Abs(filtered[j].Gain7D)
 		})
 
-		// Cap total execution at 3 to respect position sizing limits
 		if len(filtered) > 3 {
 			filtered = filtered[:3]
 		}
 
-		total := len(buyCandidates) + len(sellCandidates)
-		if len(filtered) < total {
-			fmt.Printf("\n📊 Contextual ranking: %d candidates (L:%d/S:%d) → top %d for execution\n",
-				total, len(buyCandidates), len(sellCandidates), len(filtered))
-		}
-		fmt.Println()
-
-		// ── Pass 3: Local confidence + AI verify + execute filtered set ──
 		for _, c := range filtered {
 			asset := c.Asset
-			sig := c.Signal
+			sig := EvaluateMarketSnapshot(asset)
 
-			// ── Local confidence assessment ──
-			localConfident := false
-			
 			if sig.Conviction >= 2 {
-				localConfident = true
-			}
-
-			if localConfident {
 				fmt.Printf("💡 [%s] Local confidence=%.0f%% (Conviction %d) — bypassing AI, executing directly.\n", asset.Symbol, sig.Confidence*100, sig.Conviction)
 				err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice, asset.Snap4h.Indicators.ATR14, sig.Confidence, asset.Snap4h.Candles)
 				if err != nil {
@@ -420,7 +393,6 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 				continue
 			}
 			fmt.Printf("   🤖 AI VERDICT: [%s] (Confidence: %.2f)\n", aiResp.Verdict, aiResp.Confidence)
-			fmt.Printf("   🤖 AI Reason: %s\n", aiResp.Explanation)
 
 			if aiResp.Verdict == "CONFIRMED" {
 				fmt.Println("   💸 Signal authorized by AI. Passing transaction payload to Bybit...")

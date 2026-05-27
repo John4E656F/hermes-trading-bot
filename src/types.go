@@ -85,6 +85,7 @@ const (
 type S1Signal struct { Active bool; Action SignalAction; Reason string; Proximity float64 }
 type S2Signal struct { Active bool; Action SignalAction; Reason string; SqueezeType string }
 type S3Signal struct { Active bool; Action SignalAction; Reason string; Primed bool }
+type S0Signal struct { Active bool; Action SignalAction; Reason string }
 
 type AssetSnapshot struct {
 	Symbol        string

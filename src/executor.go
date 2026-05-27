@@ -82,7 +82,11 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 
 		// ESPORTS/penny-stock price protection: if TP/SL rounds to $0, use %-based fallback
 		if tpVal, _ := strconv.ParseFloat(takeProfitPrice, 64); tpVal <= 0.01 {
-			takeProfitPrice = fmt.Sprintf("%.2f", price*1.5)
+			if action == ACTION_SELL {
+				takeProfitPrice = fmt.Sprintf("%.2f", price*0.5) // short: TP below entry
+			} else {
+				takeProfitPrice = fmt.Sprintf("%.2f", price*1.5) // long: TP above entry
+			}
 		}
 		if slVal, _ := strconv.ParseFloat(stopLossPrice, 64); slVal <= 0.001 {
 			stopLossPrice = fmt.Sprintf("%.2f", price*0.5)
@@ -159,6 +163,21 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 
 	if qtyStr == "" || qtyStr == "0" {
 		return fmt.Errorf("position sizing calculation yielded zero contracts")
+	}
+
+	// ── Minimum order value check (Bybit requires ≥ 5 USDT) ──
+	orderValue, _ := strconv.ParseFloat(qtyStr, 64)
+	orderValue = orderValue * price
+	if orderValue < MIN_ORDER_USD && orderValue > 0 {
+		// Scale up to minimum, respecting 85% wallet cap
+		scaleFactor := MIN_ORDER_USD / orderValue
+		maxFromCapital := (e.TotalCapital * 0.85) / price
+		if newQty := math.Min(orderValue*scaleFactor, maxFromCapital); newQty >= MIN_ORDER_USD {
+			qtyStr = strconv.FormatFloat(newQty, 'f', -1, 64)
+		} else {
+			return fmt.Errorf("order value $%.2f below minimum $%.2f and wallet too small to scale",
+				orderValue, MIN_ORDER_USD)
+		}
 	}
 
 	// 3. Assemble Unified Bracket Payload
