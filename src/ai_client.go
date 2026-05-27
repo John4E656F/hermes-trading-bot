@@ -59,7 +59,7 @@ func (ai *AIClient) ValidateSignal(sig StrategySignal, price float64, rsi float6
 
 	// 1. Compress indicators to minimize token spending completely
 	compactContext := fmt.Sprintf(
-		"Symbol:%s|Price:%.2f|Strat:%s|Action:%s|Conviction:%d|RSI:%.1f|ATR:%.2f",
+		"Symbol:%s|Price:%g|Strat:%s|Action:%s|Conviction:%d|RSI:%.1f|ATR:%g",
 		sig.Symbol, price, sig.Strategy, sig.Action, sig.Conviction, rsi, atr,
 	)
 

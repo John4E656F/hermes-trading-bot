@@ -121,23 +121,43 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 	// ── Update 2b: Dynamic Decimal Precision Fix for Bybit V5 ──
 	var qtyStr string
 
-	switch {
-	case positionSizeTokens < 1.0:
-		// Fractional coins (e.g., BTC, ETH) - typically 3 decimals max
-		qtyStr = strconv.FormatFloat(math.Trunc(positionSizeTokens*1000)/1000, 'f', 3, 64)
-	case positionSizeTokens < 100.0:
-		// Mid-tier coins (e.g., SOL, LINK) - typically 1 decimal
-		qtyStr = strconv.FormatFloat(math.Trunc(positionSizeTokens*10)/10, 'f', 1, 64)
-	default:
-		// Penny coins / high volume (e.g., XRP, ADA) - integer only
-		qtyStr = strconv.FormatFloat(math.Trunc(positionSizeTokens), 'f', 0, 64)
+	info, err := e.Client.GetInstrumentInfo(symbol)
+	if err == nil && info.QtyStep > 0 {
+		// Enforce minimum quantity rules
+		if positionSizeTokens < info.MinQty {
+			positionSizeTokens = info.MinQty
+		}
+		
+		// Snap quantity to Bybit's required step size
+		positionSizeTokens = math.Floor(positionSizeTokens/info.QtyStep) * info.QtyStep
+		qtyStr = strconv.FormatFloat(positionSizeTokens, 'f', -1, 64)
+		
+		// Snap TakeProfit/StopLoss to Bybit's price tick size
+		if info.PriceStep > 0 {
+			tpVal, _ := strconv.ParseFloat(takeProfitPrice, 64)
+			slVal, _ := strconv.ParseFloat(stopLossPrice, 64)
+			
+			tpVal = math.Floor(tpVal/info.PriceStep) * info.PriceStep
+			slVal = math.Floor(slVal/info.PriceStep) * info.PriceStep
+			
+			takeProfitPrice = strconv.FormatFloat(tpVal, 'f', -1, 64)
+			stopLossPrice = strconv.FormatFloat(slVal, 'f', -1, 64)
+		}
+	} else {
+		// Fallback formatting if API fails (unlikely, but safe to keep)
+		switch {
+		case positionSizeTokens < 1.0:
+			qtyStr = strconv.FormatFloat(math.Trunc(positionSizeTokens*1000)/1000, 'f', 3, 64)
+		case positionSizeTokens < 100.0:
+			qtyStr = strconv.FormatFloat(math.Trunc(positionSizeTokens*10)/10, 'f', 1, 64)
+		default:
+			qtyStr = strconv.FormatFloat(math.Trunc(positionSizeTokens), 'f', 0, 64)
+		}
+		qtyStr = strings.TrimRight(qtyStr, "0")
+		qtyStr = strings.TrimRight(qtyStr, ".")
 	}
 
-	// Strip trailing zeros and decimals to satisfy strict Bybit param validation
-	qtyStr = strings.TrimRight(qtyStr, "0")
-	qtyStr = strings.TrimRight(qtyStr, ".")
-
-	if qtyStr == "" {
+	if qtyStr == "" || qtyStr == "0" {
 		return fmt.Errorf("position sizing calculation yielded zero contracts")
 	}
 
