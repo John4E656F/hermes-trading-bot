@@ -18,7 +18,7 @@ type PositionReport struct {
 
 // PrintActivePositionsQueries reads live open derivatives contract exposure from Bybit V5
 func PrintActivePositionsQueries(client *BybitClient) {
-	respBytes, err := client.GetPrivateRequest("/v5/position/list?category=linear")
+	respBytes, err := client.GetPrivateRequest("/v5/position/list?category=linear&settleCoin=USDT")
 	if err != nil {
 		fmt.Printf("⚠️ Failed pulling open positions matrix: %v\n", err)
 		return

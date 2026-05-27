@@ -17,18 +17,39 @@ import (
 )
 
 type BybitClient struct {
-	BaseURL    string
-	APIKey     string
-	APISecret  string
-	HTTPClient *http.Client
+	BaseURL     string
+	APIKey      string
+	APISecret   string
+	HTTPClient  *http.Client
+	ClockOffset int64
 }
 
 func NewBybitClient() *BybitClient {
-	return &BybitClient{
+	client := &BybitClient{
 		BaseURL:    "https://api.bybit.com",
 		APIKey:     os.Getenv("BYBIT_API_KEY"),
 		APISecret:  os.Getenv("BYBIT_API_SECRET"),
 		HTTPClient: &http.Client{Timeout: 10 * time.Second},
+	}
+	client.SyncTime()
+	return client
+}
+
+// SyncTime fetches Bybit's server time and calculates the clock offset
+func (c *BybitClient) SyncTime() {
+	resp, err := c.HTTPClient.Get(c.BaseURL + "/v5/market/time")
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	
+	var res struct {
+		RetCode int   `json:"retCode"`
+		Time    int64 `json:"time"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err == nil && res.RetCode == 0 {
+		localTime := time.Now().UnixMilli()
+		c.ClockOffset = res.Time - localTime
 	}
 }
 
@@ -90,8 +111,8 @@ func (c *BybitClient) FetchKlines(symbol, interval string, limit int) ([]Candle,
 // NOTE: For GET requests, Bybit V5 requires the raw query string to be
 // included in the HMAC signature (unlike POST where it's the JSON body).
 func (c *BybitClient) GetPrivateRequest(endpoint string) ([]byte, error) {
-	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
-	recvWindow := "5000"
+	timestamp := strconv.FormatInt(time.Now().UnixMilli()+c.ClockOffset, 10)
+	recvWindow := "10000"
 
 	// Extract the query string (everything after '?') for signature computation.
 	qs := ""
@@ -116,7 +137,16 @@ func (c *BybitClient) GetPrivateRequest(endpoint string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	return io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	
+	if len(bodyBytes) == 0 {
+		return nil, fmt.Errorf("bybit api returned empty response, status code: %d", resp.StatusCode)
+	}
+
+	return bodyBytes, nil
 }
 
 // FetchOpenInterest retrieves public open interest history for a symbol.
@@ -194,15 +224,14 @@ func (c *BybitClient) FetchTopSymbols(n int) ([]string, error) {
 	return symbols, nil
 }
 
-// PostPrivateRequest routes authenticated execution calls directly to Bybit's engine
 func (c *BybitClient) PostPrivateRequest(endpoint string, payload map[string]interface{}) ([]byte, error) {
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
 
-	timestamp := strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10)
-	recvWindow := "5000"
+	timestamp := strconv.FormatInt(time.Now().UnixMilli()+c.ClockOffset, 10)
+	recvWindow := "10000"
 	signature := c.generateSignature(timestamp, recvWindow, string(jsonData))
 
 	req, err := http.NewRequest("POST", c.BaseURL+endpoint, bytes.NewBuffer(jsonData))
