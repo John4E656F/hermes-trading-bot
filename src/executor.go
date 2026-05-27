@@ -34,55 +34,100 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 		return fmt.Errorf("ABORT: confidence too low (%.2f) — aborting trade", confidence)
 	}
 
-	var riskPct float64
-	switch {
-	case confidence >= 0.80:
-		riskPct = 0.015 // 1.5 % of live wallet
-	case confidence >= 0.70:
-		riskPct = 0.010 // 1.0 % of live wallet
-	default:
-		riskPct = 0.005 // 0.5 %  (confidence 0.60–0.69)
-	}
-	fmt.Printf("   📊 AI confidence = %.2f → Risk = %.1f%% of $%.2f wallet\n", confidence, riskPct*100, e.TotalCapital)
+var riskPct float64
+		switch {
+		case confidence >= 0.80:
+			riskPct = 0.015 // 1.5 % of live wallet
+		case confidence >= 0.70:
+			riskPct = 0.010 // 1.0 % of live wallet
+		default:
+			riskPct = 0.005 // 0.5 %  (confidence 0.60–0.69)
+		}
 
-	// 1. Enforce Isolated Margin Mode (Category: linear = Perpetual Contracts)
-	marginPayload := map[string]interface{}{
-		"category":     "linear",
-		"symbol":       symbol,
-		"tradeMode":    1, // 1 = Isolated Margin Mode, 0 = Cross Margin Mode
-		"buyLeverage":  strconv.Itoa(e.MaxLeverage),
-		"sellLeverage": strconv.Itoa(e.MaxLeverage),
-	}
-	// Bybit will return error code 110026 if asset is already configured to isolated 3x, we can proceed safely
-	_, _ = e.Client.PostPrivateRequest("/v5/position/set-leverage", marginPayload)
+		fmt.Printf("   📊 AI confidence = %.2f → Risk = %.1f%% of $%.2f wallet\n", confidence, riskPct*100, e.TotalCapital)
 
-	// 2. Risk Sizing Computations — uses dynamic riskPct from confidence
-	var stopLossPrice, takeProfitPrice, side string
-	atrDistance := atr * 2.0 // Stop Loss buffered at 2x ATR standard deviation
+		// 1. Enforce Isolated Margin Mode (Category: linear = Perpetual Contracts)
+		marginPayload := map[string]interface{}{
+			"category":     "linear",
+			"symbol":       symbol,
+			"tradeMode":    1, // 1 = Isolated Margin Mode, 0 = Cross Margin Mode
+			"buyLeverage":  strconv.Itoa(e.MaxLeverage),
+			"sellLeverage": strconv.Itoa(e.MaxLeverage),
+		}
+		_, _ = e.Client.PostPrivateRequest("/v5/position/set-leverage", marginPayload)
 
-	riskAmount := e.TotalCapital * riskPct // Max dollar loss allowed (dynamic)
-	positionSizeTokens := riskAmount / atrDistance
+		// 2. Risk Sizing Computations — uses dynamic riskPct from confidence
+		var stopLossPrice, takeProfitPrice, side string
+		atrDistance := atr * 2.0
 
-	if action == ACTION_BUY {
-		side = "Buy"
-		stopLossPrice = fmt.Sprintf("%.2f", price-atrDistance)
-		takeProfitPrice = fmt.Sprintf("%.2f", price+(atrDistance*2.5)) // 1 : 2.5 Risk-to-Reward ratio target
-	} else if action == ACTION_SELL {
-		side = "Sell"
-		stopLossPrice = fmt.Sprintf("%.2f", price+atrDistance)
-		takeProfitPrice = fmt.Sprintf("%.2f", price-(atrDistance*2.5))
-	} else {
-		return nil
-	}
+		// ── Micro-wallet mode (balance < $20): go all-in on the strongest signal ──
+		// Small accounts can't split risk into tiny fractions that Bybit rejects.
+		// Instead of 1.5% of $6 → $0.09, we send the minimum $5 order.
+		const MIN_ORDER_USD = 5.0
+		var positionSizeTokens float64
 
-	// Ensure position size meets Bybit's absolute minimum contract specifications
-	if symbol == "BNBUSDT" && positionSizeTokens < 0.01 {
-		positionSizeTokens = 0.01
-	} else if symbol == "BTCUSDT" && positionSizeTokens < 0.001 {
-		positionSizeTokens = 0.001
-	} else if positionSizeTokens < 0.1 {
-		positionSizeTokens = 0.1 // Standard floor for cheaper altcoins
-	}
+		if e.TotalCapital < 20.0 {
+			// All-in on this single best signal at the minimum contract value
+			positionSizeUSD := math.Max(MIN_ORDER_USD, math.Min(e.TotalCapital*0.85, 10.0))
+			positionSizeTokens = positionSizeUSD / price
+
+			// Enforce minimum contract size based on asset price tier
+			switch {
+			case price > 100.0:
+				positionSizeTokens = math.Ceil(positionSizeTokens*1000) / 1000 // 3 decimals
+			case price >= 1.0:
+				positionSizeTokens = math.Ceil(positionSizeTokens*10) / 10    // 1 decimal
+			default:
+				positionSizeTokens = math.Ceil(positionSizeTokens)             // whole int
+			}
+
+			if action == ACTION_BUY {
+				side = "Buy"
+				stopLossPrice = fmt.Sprintf("%.2f", price-atrDistance)
+				takeProfitPrice = fmt.Sprintf("%.2f", price+(atrDistance*2.5))
+			} else {
+				side = "Sell"
+				stopLossPrice = fmt.Sprintf("%.2f", price+atrDistance)
+				takeProfitPrice = fmt.Sprintf("%.2f", price-(atrDistance*2.5))
+			}
+
+			// ESPORTS/penny-stock price protection: if TP/SL rounds to $0, use %-based fallback
+			if tpVal, _ := strconv.ParseFloat(takeProfitPrice, 64); tpVal <= 0.01 {
+				takeProfitPrice = fmt.Sprintf("%.2f", price*1.5)
+			}
+			if slVal, _ := strconv.ParseFloat(stopLossPrice, 64); slVal <= 0.001 {
+				stopLossPrice = fmt.Sprintf("%.2f", price*0.5)
+			}
+
+			fmt.Printf("   📊 (Micro-wallet mode) position=$%.2f contracts=%.4f SL=%s TP=%s\n",
+				positionSizeUSD, positionSizeTokens, stopLossPrice, takeProfitPrice)
+
+		} else {
+			// Normal mode: standard confidence-based risk sizing
+			riskAmount := e.TotalCapital * riskPct
+			positionSizeTokens = riskAmount / atrDistance
+
+			if action == ACTION_BUY {
+				side = "Buy"
+				stopLossPrice = fmt.Sprintf("%.2f", price-atrDistance)
+				takeProfitPrice = fmt.Sprintf("%.2f", price+(atrDistance*2.5))
+			} else if action == ACTION_SELL {
+				side = "Sell"
+				stopLossPrice = fmt.Sprintf("%.2f", price+atrDistance)
+				takeProfitPrice = fmt.Sprintf("%.2f", price-(atrDistance*2.5))
+			} else {
+				return nil
+			}
+
+			// Ensure position size meets Bybit's absolute minimum contract specifications
+			if symbol == "BNBUSDT" && positionSizeTokens < 0.01 {
+				positionSizeTokens = 0.01
+			} else if symbol == "BTCUSDT" && positionSizeTokens < 0.001 {
+				positionSizeTokens = 0.001
+			} else if positionSizeTokens < 0.1 {
+				positionSizeTokens = 0.1
+			}
+		}
 
 	// Dynamic position-size precision based on asset price tier
 	// Bybit rejects orders with too many decimal places on low-priced assets.
