@@ -253,3 +253,57 @@ func (c *BybitClient) PostPrivateRequest(endpoint string, payload map[string]int
 
 	return io.ReadAll(resp.Body)
 }
+
+type InstrumentInfo struct {
+	QtyStep   float64
+	PriceStep float64
+	MinQty    float64
+}
+
+// GetInstrumentInfo fetches the lot size and price tick precision rules for a symbol
+func (c *BybitClient) GetInstrumentInfo(symbol string) (*InstrumentInfo, error) {
+	url := fmt.Sprintf("%s/v5/market/instruments-info?category=linear&symbol=%s", c.BaseURL, symbol)
+	resp, err := c.HTTPClient.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed struct {
+		RetCode int `json:"retCode"`
+		Result  struct {
+			List []struct {
+				LotSizeFilter struct {
+					QtyStep     string `json:"qtyStep"`
+					MinOrderQty string `json:"minOrderQty"`
+				} `json:"lotSizeFilter"`
+				PriceFilter struct {
+					TickSize string `json:"tickSize"`
+				} `json:"priceFilter"`
+			} `json:"list"`
+		} `json:"result"`
+	}
+
+	if err := json.Unmarshal(respBytes, &parsed); err != nil {
+		return nil, err
+	}
+	if len(parsed.Result.List) == 0 {
+		return nil, fmt.Errorf("no instrument info found for %s", symbol)
+	}
+
+	info := parsed.Result.List[0]
+	qtyStep, _ := strconv.ParseFloat(info.LotSizeFilter.QtyStep, 64)
+	minQty, _ := strconv.ParseFloat(info.LotSizeFilter.MinOrderQty, 64)
+	priceStep, _ := strconv.ParseFloat(info.PriceFilter.TickSize, 64)
+
+	return &InstrumentInfo{
+		QtyStep:   qtyStep,
+		MinQty:    minQty,
+		PriceStep: priceStep,
+	}, nil
+}
