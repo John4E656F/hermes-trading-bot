@@ -27,7 +27,7 @@ func NewExecutionEngine(client *BybitClient, capital float64) *ExecutionEngine {
 // ExecuteBracketTrade configures margin, sizes position dynamically by
 // AI confidence score, places a Market bracket order, then sets a native
 // Bybit trailing stop derived from the 4H EMA20 distance.
-func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction, price, atr, confidence float64, candles4h []Candle) error {
+func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction, price, atr, confidence, dailyADX float64, candles4h []Candle) error {
 	fmt.Printf("🛡️ Order Executor initialized for %s. Configuring isolated environment...\n", symbol)
 
 	// ── Update 2a: Dynamic Confidence-Based Sizing ──────────────────
@@ -57,9 +57,19 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 	}
 	_, _ = e.Client.PostPrivateRequest("/v5/position/set-leverage", marginPayload)
 
-	// 2. Risk Sizing Computations — uses dynamic riskPct from confidence
-	var stopLossPrice, takeProfitPrice, side string
-	atrDistance := atr * 2.0
+// 2. Risk Sizing Computations — uses dynamic riskPct from confidence
+		// ADX-aware SL width: ranging assets need wider stops, trends can be tight
+		var slMultiplier float64
+		switch {
+		case dailyADX < 25:
+			slMultiplier = 4.0 // ranging/chop: wide SL to avoid noise stops
+		case dailyADX < 40:
+			slMultiplier = 2.5 // moderate trend: medium SL
+		default:
+			slMultiplier = 2.0 // strong trend: tight SL, trend will protect
+		}
+		var stopLossPrice, takeProfitPrice, side string
+		atrDistance := atr * slMultiplier
 
 	// ── Micro-wallet mode (balance < $20): go all-in on the strongest signal ──
 	const MIN_ORDER_USD = 5.0
@@ -180,7 +190,19 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 		}
 	}
 
-	// 3. Assemble Unified Bracket Payload
+	// ── Size Risk Guard: ensure actual SL risk ≤ target risk ──
+		slPrice, _ := strconv.ParseFloat(stopLossPrice, 64)
+		if slPrice > 0 && positionSizeTokens > 0 {
+			actualSLDist := math.Abs(price - slPrice)
+			actualRisk := actualSLDist * positionSizeTokens
+			targetRisk := e.TotalCapital * riskPct
+			if actualRisk > targetRisk*1.5 {
+				return fmt.Errorf("SIZE GUARD: actual SL risk $%.2f exceeds target $%.2f by >50%% — skipping to protect capital",
+					actualRisk, targetRisk)
+			}
+		}
+
+		// 3. Assemble Unified Bracket Payload
 	orderPayload := map[string]interface{}{
 		"category":    "linear",
 		"symbol":      symbol,
