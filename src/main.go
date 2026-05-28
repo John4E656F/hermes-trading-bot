@@ -364,14 +364,46 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 			closeConflictingPositions(exec.Client, data)
 		}
 
-		topLongs := RankSignalsByGain(buyCandidates, 3)
-		topShorts := RankSignalsByLowestGain(sellCandidates, 3)
+		// ── Filter unexecutable penny stocks — skip sub-$0.10 —─
+		var tradableBuys, tradableSells []RankedSignal
+		for _, c := range buyCandidates {
+			if c.Asset.CurrentPrice >= 0.10 {
+				c.Signal = EvaluateMarketSnapshot(c.Asset)
+				tradableBuys = append(tradableBuys, c)
+			}
+		}
+		for _, c := range sellCandidates {
+			if c.Asset.CurrentPrice >= 0.10 {
+				c.Signal = EvaluateMarketSnapshot(c.Asset)
+				tradableSells = append(tradableSells, c)
+			}
+		}
+
+		// Rank by conviction first (highest first), then |7D gain| as tiebreaker
+		sort.Slice(tradableBuys, func(i, j int) bool {
+			ci, cj := tradableBuys[i].Signal.Conviction, tradableBuys[j].Signal.Conviction
+			if ci != cj { return ci > cj }
+			return tradableBuys[i].Gain7D > tradableBuys[j].Gain7D
+		})
+		sort.Slice(tradableSells, func(i, j int) bool {
+			ci, cj := tradableSells[i].Signal.Conviction, tradableSells[j].Signal.Conviction
+			if ci != cj { return ci > cj }
+			return tradableSells[i].Gain7D < tradableSells[j].Gain7D
+		})
+
+		topLongs := tradableBuys
+		if len(topLongs) > 3 { topLongs = topLongs[:3] }
+		topShorts := tradableSells
+		if len(topShorts) > 3 { topShorts = topShorts[:3] }
 
 		var filtered []RankedSignal
 		filtered = append(filtered, topLongs...)
 		filtered = append(filtered, topShorts...)
 
+		// Final sort: conviction first, then |gain|
 		sort.Slice(filtered, func(i, j int) bool {
+			ci, cj := filtered[i].Signal.Conviction, filtered[j].Signal.Conviction
+			if ci != cj { return ci > cj }
 			return math.Abs(filtered[i].Gain7D) > math.Abs(filtered[j].Gain7D)
 		})
 
