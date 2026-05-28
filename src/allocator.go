@@ -84,6 +84,20 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		masterStrategy = "Candle Trend"
 	}
 
+	// ── Exhaustion Filter: skip overextended assets ────────────────
+	// Prevents buying assets that have already pumped (UBUSDT +130%) or
+	// selling assets in capitulation dumps where trend is exhausted.
+	gain7d := Compute7DayGain(asset.Snap1d.Candles)
+	if masterAction == ACTION_BUY && gain7d > 40.0 && dailyADX < 50 {
+		masterAction = ACTION_HOLD
+		masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D gain exceeds 40%% limit (ADX %.0f < 50). Pump exhaustion risk.", gain7d, dailyADX)
+		masterStrategy = "HOLD"
+	} else if masterAction == ACTION_SELL && gain7d < -40.0 && dailyADX < 50 {
+		masterAction = ACTION_HOLD
+		masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D loss exceeds -40%% limit (ADX %.0f < 50). Capitulation risk.", gain7d, dailyADX)
+		masterStrategy = "HOLD"
+	}
+
 	// ── Default return if Master Gate is HOLD ──
 	if masterAction == ACTION_HOLD {
 		holdReason := "Master Gate: "
@@ -195,6 +209,17 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		signal.Strategy = "META: " + masterStrategy
 		signal.Reason = fmt.Sprintf("Master Gate + %d advanced strategies aligned | %s",
 			agreeCount, advancedReasons)
+	}
+
+	// ── Moderate Extension Risk Cap ──────────────────────────────
+	// Assets with 25-40% 7D gain/loss are extended but not exhausted.
+	// Cap confidence to reduce position sizing on these borderline setups.
+	if gain7d > 25.0 && gain7d <= 40.0 && signal.Confidence > 0.70 {
+		signal.Confidence = 0.70
+		signal.Reason += " | ⚠️ 7D gain " + fmt.Sprintf("%.0f%%", gain7d) + " — risk-capped"
+	} else if gain7d < -25.0 && gain7d >= -40.0 && signal.Confidence > 0.70 {
+		signal.Confidence = 0.70
+		signal.Reason += " | ⚠️ 7D loss " + fmt.Sprintf("%.0f%%", gain7d) + " — risk-capped"
 	}
 
 	return signal
