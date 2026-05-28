@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -358,6 +359,11 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 	} else if freezeEntries {
 		fmt.Println("\n❄️ ENTRY FREEZE: Max positions reached. All signals are dashboard-only — no orders placed.")
 	} else {
+		// ── Trend-Flip Check: close positions where 4H signal reversed ──
+		if !scanMode {
+			closeConflictingPositions(exec.Client, data)
+		}
+
 		topLongs := RankSignalsByGain(buyCandidates, 3)
 		topShorts := RankSignalsByLowestGain(sellCandidates, 3)
 
@@ -379,24 +385,24 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 
 			if sig.Conviction >= 2 {
 				fmt.Printf("💡 [%s] Local confidence=%.0f%% (Conviction %d) — bypassing AI, executing directly.\n", asset.Symbol, sig.Confidence*100, sig.Conviction)
-				err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice, asset.Snap4h.Indicators.ATR14, sig.Confidence, asset.Snap4h.Candles)
-				if err != nil {
-					fmt.Printf("   ❌ Order Execution Failure: %v\n\n", err)
-				}
-				continue
-			}
-
-			fmt.Printf("💡 [%s] Active trade setup found! Initiating OpenRouter AI Verification layer...\n", asset.Symbol)
-			aiResp, err := ai.ValidateSignal(sig, asset.CurrentPrice, asset.Snap4h.Indicators.RSI14, asset.Snap4h.Indicators.ATR14)
+err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice, asset.Snap4h.Indicators.ATR14, sig.Confidence, asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles)
 			if err != nil {
-				fmt.Printf("   ❌ AI Gateway Error: %v\n\n", err)
-				continue
+				fmt.Printf("   ❌ Order Execution Failure: %v\n\n", err)
 			}
-			fmt.Printf("   🤖 AI VERDICT: [%s] (Confidence: %.2f)\n", aiResp.Verdict, aiResp.Confidence)
+			continue
+		}
 
-			if aiResp.Verdict == "CONFIRMED" {
-				fmt.Println("   💸 Signal authorized by AI. Passing transaction payload to Bybit...")
-				err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice, asset.Snap4h.Indicators.ATR14, aiResp.Confidence, asset.Snap4h.Candles)
+		fmt.Printf("💡 [%s] Active trade setup found! Initiating OpenRouter AI Verification layer...\n", asset.Symbol)
+		aiResp, err := ai.ValidateSignal(sig, asset.CurrentPrice, asset.Snap4h.Indicators.RSI14, asset.Snap4h.Indicators.ATR14)
+		if err != nil {
+			fmt.Printf("   ❌ AI Gateway Error: %v\n\n", err)
+			continue
+		}
+		fmt.Printf("   🤖 AI VERDICT: [%s] (Confidence: %.2f)\n", aiResp.Verdict, aiResp.Confidence)
+
+		if aiResp.Verdict == "CONFIRMED" {
+			fmt.Println("   💸 Signal authorized by AI. Passing transaction payload to Bybit...")
+			err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice, asset.Snap4h.Indicators.ATR14, aiResp.Confidence, asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles)
 				if err != nil {
 					fmt.Printf("   ❌ Order Execution Failure: %v\n\n", err)
 				}
@@ -406,6 +412,79 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 		}
 	}
 	fmt.Println("=========================================================================================")
+}
+
+// ── Trend-Flip Detector: close positions where the 4H signal has flipped ──
+func closeConflictingPositions(client *BybitClient, data MarketData) {
+	posResp, err := client.GetPrivateRequest("/v5/position/list?category=linear&settleCoin=USDT&limit=50")
+	if err != nil {
+		return
+	}
+	var posData struct {
+		RetCode int    `json:"retCode"`
+		RetMsg  string `json:"retMsg"`
+		Result  struct {
+			List []struct {
+				Symbol string `json:"symbol"`
+				Side   string `json:"side"`
+				Size   string `json:"size"`
+			} `json:"list"`
+		} `json:"result"`
+	}
+	json.Unmarshal(posResp, &posData)
+	if posData.RetCode != 0 || len(posData.Result.List) == 0 {
+		return
+	}
+	for _, pos := range posData.Result.List {
+		asset, exists := data.Assets[pos.Symbol]
+		if !exists {
+			continue
+		}
+		sig := EvaluateMarketSnapshot(asset)
+		if sig.Action == ACTION_HOLD {
+			continue
+		}
+		var conflict bool
+		if pos.Side == "Buy" && sig.Action == ACTION_SELL {
+			conflict = true
+		} else if pos.Side == "Sell" && sig.Action == ACTION_BUY {
+			conflict = true
+		}
+		if !conflict {
+			continue
+		}
+		size, _ := strconv.ParseFloat(pos.Size, 64)
+		if size <= 0 {
+			continue
+		}
+		closeSide := "Sell"
+		if pos.Side == "Sell" {
+			closeSide = "Buy"
+		}
+		closePayload := map[string]interface{}{
+			"category":  "linear",
+			"symbol":    pos.Symbol,
+			"side":      closeSide,
+			"orderType": "Market",
+			"qty":       pos.Size,
+		}
+		respBytes, err := client.PostPrivateRequest("/v5/order/create", closePayload)
+		if err != nil {
+			fmt.Printf("   ⚠️ [TREND-FLIP] Failed to close %s %s: %v\n", pos.Symbol, pos.Side, err)
+			continue
+		}
+		var closeRes struct {
+			RetCode int    `json:"retCode"`
+			RetMsg  string `json:"retMsg"`
+		}
+		json.Unmarshal(respBytes, &closeRes)
+		if closeRes.RetCode == 0 {
+			fmt.Printf("   🔄 [TREND-FLIP] Closed %s %s position — signal flipped to %s. Exited @ market.\n",
+				pos.Symbol, pos.Side, sig.Action)
+		} else {
+			fmt.Printf("   ⚠️ [TREND-FLIP] Close order rejected for %s: %s\n", pos.Symbol, closeRes.RetMsg)
+		}
+	}
 }
 
 // ── 4-Hour Boundary Check ─────────────────────────────────────────────
