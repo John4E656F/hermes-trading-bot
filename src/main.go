@@ -379,6 +379,32 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 			}
 		}
 
+		// ── Market Bias Filter: skip LONGs when market is bearish ──
+		totalBuys := len(tradableBuys)
+		totalSells := len(tradableSells)
+		bearishBias := totalSells > totalBuys*2
+		bullishBias := totalBuys > totalSells*2
+		if bearishBias {
+			fmt.Printf("   🐻 BEARISH BIAS: %d sells vs %d buys (%.1fx). Reducing LONG confidence.\n",
+				totalSells, totalBuys, float64(totalSells)/float64(max(totalBuys, 1)))
+			for i := range tradableBuys {
+				if tradableBuys[i].Signal.Conviction > 1 {
+					tradableBuys[i].Signal.Conviction--
+				}
+				tradableBuys[i].Signal.Confidence *= 0.5
+			}
+		}
+		if bullishBias {
+			fmt.Printf("   🐂 BULLISH BIAS: %d buys vs %d sells (%.1fx). Reducing SHORT confidence.\n",
+				totalBuys, totalSells, float64(totalBuys)/float64(max(totalSells, 1)))
+			for i := range tradableSells {
+				if tradableSells[i].Signal.Conviction > 1 {
+					tradableSells[i].Signal.Conviction--
+				}
+				tradableSells[i].Signal.Confidence *= 0.5
+			}
+		}
+
 		// Rank by conviction first (highest first), then |7D gain| as tiebreaker
 		sort.Slice(tradableBuys, func(i, j int) bool {
 			ci, cj := tradableBuys[i].Signal.Conviction, tradableBuys[j].Signal.Conviction
