@@ -18,10 +18,12 @@ import (
 )
 
 func main() {
+	// CRITICAL: First stdout flush — background pipe capture requires explicit flush
+	fmt.Println("🚀 Hermes Production Engine Initializing...")
+	os.Stdout.Sync()
+
 	// Attempt to load .env file if present, and overload any shell variables
 	_ = godotenv.Overload("../.env")
-
-	fmt.Println("🚀 Hermes Production Engine Initializing...")
 
 	// Check for testing argument flags
 	forceSignalToggle := false
@@ -328,11 +330,7 @@ func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive 
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 		allCandidates := append(buyCandidates, sellCandidates...)
-<<<<<<< HEAD
-		fmt.Printf("%-10s %-12s %-10s  %-22s\n", "SYMBOL", "ADX(1D)", "VOLUME SURGE", "7D GAIN")
-=======
 		fmt.Printf("%-10s %-12s %-22s  %-10s\n", "SYMBOL", "ADX(1D)", "VOLUME SURGE", "7D GAIN")
->>>>>>> zen-keller-l8bGb
 		for _, c := range allCandidates {
 			asset := c.Asset
 			avgVol := CalculateVolumeMA(asset.Snap4h.Candles, 20)
@@ -501,7 +499,7 @@ func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive 
 			filtered = filtered[:3]
 		}
 
-<<<<<<< HEAD
+
 		// ── Tiered Capital Protection ─────────────────────────────────
 		// Replaces hardcoded $103 peak. Scales minimum conviction requirement
 		// with wallet size so the bot can still trade its way back on high-quality
@@ -564,46 +562,8 @@ func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive 
 					fmt.Println("   🛡️ Signal REJECTED by AI risk layer. Order routing halted.")
 				}
 			}
-		}
-	}
-=======
-		// ── Drawdown Circuit Breaker ──
-		peakCapital := 103.0 // highest wallet seen
-		if data.LiveBalance < peakCapital*0.85 {
-			fmt.Printf("🚨 DRAWDOWN LIMIT REACHED: $%.2f < 85%% of peak $%.2f. Blocking ALL entries.\n", data.LiveBalance, peakCapital)
-		} else {
-			// Normal trading flow inside this else block
-
-		for _, c := range filtered {
-			asset := c.Asset
-			sig := c.Signal
-
-			// Execution threshold: Conviction >= 2 AND Confidence >= 0.70.
-			// Conviction 1 signals are logged only — never executed.
-			if sig.Conviction < 2 || sig.Confidence < 0.70 {
-				fmt.Printf("   📋 [%s] Conv%d/%.0f%% — below execution threshold. Logged only.\n",
-					asset.Symbol, sig.Conviction, sig.Confidence*100)
-				continue
-			}
-
-			fmt.Printf("💡 [%s] Conv%d/%.0f%% (%s) — executing.\n",
-				asset.Symbol, sig.Conviction, sig.Confidence*100, sig.Strategy)
-			err := exec.ExecuteBracketTrade(
-				asset.Symbol, sig.Action, asset.CurrentPrice,
-				asset.Snap4h.Indicators.ATR14, sig.Confidence,
-				asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles,
-			)
-			if err != nil {
-				fmt.Printf("   ❌ Execution failed: %v\n\n", err)
-			}
-		}
-	}
-	// End drawdown circuit-breaker
-	}
->>>>>>> zen-keller-l8bGb
-	fmt.Println("=========================================================================================")
-}
-
+\t\t}
+\t}
 // ── Trend-Flip Detector: close positions where the 4H signal has flipped ──
 func closeConflictingPositions(client *BybitClient, data MarketData) {
 	posResp, err := client.GetPrivateRequest("/v5/position/list?category=linear&settleCoin=USDT&limit=50")
