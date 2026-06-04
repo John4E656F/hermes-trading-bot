@@ -14,6 +14,7 @@ type StrategySignal struct {
 	S1         S1Signal
 	S2         S2Signal
 	S3         S3Signal
+	S4         S4Signal
 }
 
 // EvaluateMarketSnapshot makes the FINAL decision on every trade.
@@ -144,22 +145,36 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		}
 	}
 
-	// ── S0: Only agrees when setup is verified (NO auto-agree) ─────
-	// S0 independently verifies the setup using proven candle patterns
+	// ── S0: Independent candle-pattern verification ────────────────
+	// S0 confirms the master gate using different lenses.
+	// Oversold/overbought reversal setups have their own S0 path so those
+	// master gate conditions are not silently dead.
 	s0 := S0Signal{Active: false}
-	if masterAction == ACTION_BUY && rsi14 > 50 && latestPrice > ema20 && latestPrice > sma50 {
-		s0 = S0Signal{Active: true, Action: ACTION_BUY, Reason: "Candle momentum: RSI>50, above EMA20+SMA50."}
-	} else if masterAction == ACTION_SELL && rsi14 < 50 && latestPrice < ema20 && latestPrice < sma50 {
-		s0 = S0Signal{Active: true, Action: ACTION_SELL, Reason: "Candle momentum: RSI<50, below EMA20+SMA50."}
-	} else if strongTrend {
-		// Strong trend bypasses the RSI/MA check
-		s0 = S0Signal{Active: true, Action: masterAction, Reason: fmt.Sprintf("Strong trend (ADX %.0f>40).", dailyADX)}
+	switch {
+	case masterAction == ACTION_BUY && rsi14 > 50 && latestPrice > ema20 && latestPrice > sma50:
+		s0 = S0Signal{Active: true, Action: ACTION_BUY,
+			Reason: "Candle momentum: RSI>50, price above EMA20+SMA50."}
+	case masterAction == ACTION_SELL && rsi14 < 50 && latestPrice < ema20 && latestPrice < sma50:
+		s0 = S0Signal{Active: true, Action: ACTION_SELL,
+			Reason: "Candle momentum: RSI<50, price below EMA20+SMA50."}
+	case strongTrend:
+		s0 = S0Signal{Active: true, Action: masterAction,
+			Reason: fmt.Sprintf("Strong trend (ADX %.0f>40) confirms direction.", dailyADX)}
+	case masterAction == ACTION_BUY && rsi14 < 32 && volRatio >= 1.5:
+		// Oversold reversal: price below EMA20 but deeply oversold with volume
+		s0 = S0Signal{Active: true, Action: ACTION_BUY,
+			Reason: fmt.Sprintf("Oversold reversal: RSI %.0f<32 + vol surge %.1fx.", rsi14, volRatio)}
+	case masterAction == ACTION_SELL && rsi14 > 68 && volRatio >= 1.5:
+		// Overbought rejection: price above EMA20 but deeply overbought with volume
+		s0 = S0Signal{Active: true, Action: ACTION_SELL,
+			Reason: fmt.Sprintf("Overbought rejection: RSI %.0f>68 + vol surge %.1fx.", rsi14, volRatio)}
 	}
 
 	// ── Advanced Strategies ───────────────────────────────────────
 	s1 := EvaluateS1MeanReversion(latestPrice, asset.VP)
 	s2 := EvaluateS2Squeeze(asset.OI, asset.Funding, latestPrice, ema20)
 	s3 := EvaluateS3Breakout(latestPrice, asset.Consolidation, latestVol, avgVol)
+	s4 := EvaluateS4MACD(snap4h.Candles)
 
 	signal := StrategySignal{
 		Symbol: asset.Symbol,
@@ -169,11 +184,11 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		S1:     s1,
 		S2:     s2,
 		S3:     s3,
+		S4:     s4,
 	}
 
 	// ── Honest Conviction Scoring ─────────────────────────────────
-	// Base = 1 for Master Gate. +1 only for S0 if verified independently.
-	// +1 for each advanced strategy (S1/S2/S3) that agrees.
+	// S0 = 1 point (if independently verified). S1/S2/S3/S4 each add 1 if aligned.
 	agreeCount := 0
 	advancedReasons := ""
 
@@ -181,30 +196,25 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		agreeCount = 1
 	}
 
-	for _, s := range []string{"S1", "S2", "S3"} {
-		var active bool
-		var advAction SignalAction
-		var reason string
-		switch s {
-		case "S1":
-			active = s1.Active
-			advAction = s1.Action
-			reason = s1.Reason
-		case "S2":
-			active = s2.Active
-			advAction = s2.Action
-			reason = s2.Reason
-		case "S3":
-			active = s3.Active
-			advAction = s3.Action
-			reason = s3.Reason
-		}
-		if active && advAction == masterAction {
+	type stratCheck struct {
+		name   string
+		active bool
+		action SignalAction
+		reason string
+	}
+	checks := []stratCheck{
+		{"S1", s1.Active, s1.Action, s1.Reason},
+		{"S2", s2.Active, s2.Action, s2.Reason},
+		{"S3", s3.Active, s3.Action, s3.Reason},
+		{"S4", s4.Active, s4.Action, s4.Reason},
+	}
+	for _, c := range checks {
+		if c.active && c.action == masterAction {
 			agreeCount++
 			if advancedReasons != "" {
 				advancedReasons += " | "
 			}
-			advancedReasons += fmt.Sprintf("%s: %s", s, reason)
+			advancedReasons += fmt.Sprintf("%s: %s", c.name, c.reason)
 		}
 	}
 
