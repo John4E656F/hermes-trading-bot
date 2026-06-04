@@ -32,3 +32,4 @@ Thumbs.db
 # ── Go test cache ──
 *.out
 *.cov
+src/src
