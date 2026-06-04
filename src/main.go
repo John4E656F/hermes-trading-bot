@@ -525,45 +525,25 @@ func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive 
 				asset := c.Asset
 				sig := c.Signal
 
-				if sig.Conviction < minConviction {
-					fmt.Printf("   ⏭️  [%s] Skipped: Conviction %d < %d required in current capital mode.\n",
-						asset.Symbol, sig.Conviction, minConviction)
+				if sig.Conviction < minConviction || sig.Confidence < 0.70 {
+					fmt.Printf("   [%s] Conv%d/%.0f%% — below threshold (need Conv%d/70%%). Logged only.\n",
+						asset.Symbol, sig.Conviction, sig.Confidence*100, minConviction)
 					continue
 				}
 
-				if sig.Conviction >= 2 && sig.Confidence >= 0.70 {
-					fmt.Printf("💡 [%s] Conviction %d / %.0f%% — bypassing AI, executing directly.\n",
-						asset.Symbol, sig.Conviction, sig.Confidence*100)
-					if err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice,
-						asset.Snap4h.Indicators.ATR14, sig.Confidence,
-						asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles); err != nil {
-						fmt.Printf("   ❌ Order Execution Failure: %v\n\n", err)
-					}
-					continue
-				}
-
-				fmt.Printf("💡 [%s] Conviction %d — routing through AI validation layer...\n",
-					asset.Symbol, sig.Conviction)
-				aiResp, err := ai.ValidateSignal(sig, asset.CurrentPrice,
-					asset.Snap4h.Indicators.RSI14, asset.Snap4h.Indicators.ATR14)
-				if err != nil {
-					fmt.Printf("   ❌ AI Gateway Error: %v\n\n", err)
-					continue
-				}
-				fmt.Printf("   🤖 AI VERDICT: [%s] (Confidence: %.2f)\n", aiResp.Verdict, aiResp.Confidence)
-				if aiResp.Verdict == "CONFIRMED" {
-					fmt.Println("   💸 Signal authorized by AI. Routing to Bybit...")
-					if err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice,
-						asset.Snap4h.Indicators.ATR14, aiResp.Confidence,
-						asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles); err != nil {
-						fmt.Printf("   ❌ Order Execution Failure: %v\n\n", err)
-					}
-				} else {
-					fmt.Println("   🛡️ Signal REJECTED by AI risk layer. Order routing halted.")
+				fmt.Printf("[%s] Conv%d/%.0f%% (%s) — executing.\n",
+					asset.Symbol, sig.Conviction, sig.Confidence*100, sig.Strategy)
+				if err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice,
+					asset.Snap4h.Indicators.ATR14, sig.Confidence,
+					asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles); err != nil {
+					fmt.Printf("   Execution failed: %v\n\n", err)
 				}
 			}
-\t\t}
-\t}
+		}
+	}
+	fmt.Println("=========================================================================================")
+}
+
 // ── Trend-Flip Detector: close positions where the 4H signal has flipped ──
 func closeConflictingPositions(client *BybitClient, data MarketData) {
 	posResp, err := client.GetPrivateRequest("/v5/position/list?category=linear&settleCoin=USDT&limit=50")

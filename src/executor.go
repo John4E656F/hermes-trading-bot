@@ -79,63 +79,6 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 		"sellLeverage": strconv.Itoa(e.MaxLeverage),
 	})
 
-<<<<<<< HEAD
-// 2. Risk Sizing Computations — uses dynamic riskPct from confidence
-		// ADX-aware SL/TP: tighter SL means better RR
-		// Ranging (ADX<25): 2x ATR SL, 6x ATR TP → 1:3 RR (need 25% win rate to break even)
-		// Mixed  (25-40):  2x ATR SL, 5x ATR TP → 1:2.5 RR (need 29% win rate)
-		// Trend  (ADX>40): 1.5x ATR SL, 5x ATR TP → 1:3.3 RR (need 23% win rate)
-		var slMultiplier float64
-		var tpMultiplier float64
-		switch {
-		case dailyADX < 25:
-			slMultiplier = 2.0
-			tpMultiplier = 6.0
-		case dailyADX < 40:
-			slMultiplier = 2.0
-			tpMultiplier = 5.0
-		default:
-			slMultiplier = 1.5
-			tpMultiplier = 5.0
-		}
-		var stopLossPrice, takeProfitPrice, side string
-		atrDistance := atr * slMultiplier
-
-	// ── Micro-wallet mode (balance < $20): go all-in on the strongest signal ──
-	const MIN_ORDER_USD = 5.0
-	var positionSizeTokens float64
-
-	if e.TotalCapital < 20.0 {
-		// All-in on this single best signal at the minimum contract value
-		positionSizeUSD := math.Max(MIN_ORDER_USD, math.Min(e.TotalCapital*0.85, 10.0))
-		positionSizeTokens = positionSizeUSD / price
-
-		if action == ACTION_BUY {
-			side = "Buy"
-			stopLossPrice = strconv.FormatFloat(price-atrDistance, 'f', 8, 64)
-			takeProfitPrice = strconv.FormatFloat(price+(atr*tpMultiplier), 'f', 8, 64)
-		} else if action == ACTION_SELL {
-			side = "Sell"
-			stopLossPrice = strconv.FormatFloat(price+atrDistance, 'f', 8, 64)
-			takeProfitPrice = strconv.FormatFloat(price-(atr*tpMultiplier), 'f', 8, 64)
-		}
-
-		// Penny-stock price protection: if TP/SL is zero after precision loss, use %-based fallback
-		if tpVal, _ := strconv.ParseFloat(takeProfitPrice, 64); tpVal <= 0 {
-			if action == ACTION_SELL {
-				takeProfitPrice = strconv.FormatFloat(price*0.5, 'f', 8, 64)
-			} else {
-				takeProfitPrice = strconv.FormatFloat(price*1.5, 'f', 8, 64)
-			}
-		}
-		if slVal, _ := strconv.ParseFloat(stopLossPrice, 64); slVal <= 0 {
-			stopLossPrice = strconv.FormatFloat(price*0.5, 'f', 8, 64)
-		}
-
-		fmt.Printf("   📊 (Micro-wallet mode) position=$%.2f SL=%s TP=%s\n",
-			positionSizeUSD, stopLossPrice, takeProfitPrice)
-
-=======
 	// ── Position sizing ───────────────────────────────────────────────
 	var stopLossPrice, takeProfitPrice, side string
 	var positionSizeTokens float64
@@ -144,35 +87,9 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 		// Micro-wallet: go in at minimum viable size
 		posUSD := math.Max(MIN_ORDER_USD, math.Min(e.TotalCapital*0.85, 10.0))
 		positionSizeTokens = posUSD / price
->>>>>>> zen-keller-l8bGb
 	} else {
 		riskAmount := e.TotalCapital * riskPct
-<<<<<<< HEAD
-		positionSizeTokens = riskAmount / atrDistance
-
-		if action == ACTION_BUY {
-			side = "Buy"
-			stopLossPrice = strconv.FormatFloat(price-atrDistance, 'f', 8, 64)
-			takeProfitPrice = strconv.FormatFloat(price+(atr*tpMultiplier), 'f', 8, 64)
-		} else if action == ACTION_SELL {
-			side = "Sell"
-			stopLossPrice = strconv.FormatFloat(price+atrDistance, 'f', 8, 64)
-			takeProfitPrice = strconv.FormatFloat(price-(atr*tpMultiplier), 'f', 8, 64)
-		} else {
-			return nil
-		}
-
-		// Absolute minimum fallback
-		if symbol == "BNBUSDT" && positionSizeTokens < 0.01 {
-			positionSizeTokens = 0.01
-		} else if symbol == "BTCUSDT" && positionSizeTokens < 0.001 {
-			positionSizeTokens = 0.001
-		} else if positionSizeTokens < 0.1 {
-			positionSizeTokens = 0.1
-		}
-=======
 		positionSizeTokens = riskAmount / atrDist
->>>>>>> zen-keller-l8bGb
 	}
 
 	switch action {

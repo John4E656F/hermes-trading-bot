@@ -89,15 +89,10 @@ type S0Signal struct { Active bool; Action SignalAction; Reason string }
 type S1Signal struct { Active bool; Action SignalAction; Reason string; Proximity float64 }
 type S2Signal struct { Active bool; Action SignalAction; Reason string; SqueezeType string }
 type S3Signal struct { Active bool; Action SignalAction; Reason string; Primed bool }
-<<<<<<< HEAD
-type S0Signal struct { Active bool; Action SignalAction; Reason string }
-type S4Signal struct { Active bool; Action SignalAction; Reason string; CrossType string }
-=======
 // S4: Funding Rate Contrarian — LEADING signal. Extreme funding predicts reversals.
 type S4Signal struct { Active bool; Action SignalAction; Reason string; FundingRate float64 }
 // S5: Bollinger Band Squeeze Breakout — energy-release signal after compression.
 type S5Signal struct { Active bool; Action SignalAction; Reason string; BBWidthPct float64 }
->>>>>>> zen-keller-l8bGb
 
 type AssetSnapshot struct {
 	Symbol        string
