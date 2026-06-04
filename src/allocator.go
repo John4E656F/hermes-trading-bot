@@ -34,6 +34,9 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	currentRegime := ClassifyRegime(dailyADX)
 
 	snap4h := asset.Snap4h
+	if len(snap4h.Candles) == 0 {
+		return StrategySignal{Symbol: asset.Symbol, Regime: currentRegime, Action: ACTION_HOLD, Strategy: "HOLD", Reason: "No candle data available"}
+	}
 	latestPrice := snap4h.Candles[len(snap4h.Candles)-1].Close
 	ema20 := snap4h.Indicators.EMA20
 	rsi14 := snap4h.Indicators.RSI14
@@ -45,7 +48,10 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 
 	avgVol := CalculateVolumeMA(snap4h.Candles, 20)
 	latestVol := snap4h.Candles[len(snap4h.Candles)-1].Volume
-	volRatio := latestVol / avgVol
+	var volRatio float64
+	if avgVol > 0 {
+		volRatio = latestVol / avgVol
+	}
 	gain7d := Compute7DayGain(asset.Snap1d.Candles)
 
 	// ── Evaluate all sub-strategies ──────────────────────────────────
