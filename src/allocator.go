@@ -204,15 +204,11 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 				Reason: fmt.Sprintf("Strong trend bypass (ADX %.0f>40) — S0 confirmed.", dailyADX)}
 		}
 	}
->>>>>>> zen-keller-l8bGb
 	signal := StrategySignal{
 		Symbol: asset.Symbol,
 		Regime: currentRegime,
 		Action: masterAction,
 		S0:     s0,
-		S1:     s1,
-		S2:     s2,
-S0:     s0,
 		S1:     s1,
 		S2:     s2,
 		S3:     s3,
@@ -235,34 +231,20 @@ S0:     s0,
 		action SignalAction
 		reason string
 	}
-<<<<<<< HEAD
-	checks := []stratCheck{
-=======
 	subs := []subSignal{
->>>>>>> zen-keller-l8bGb
 		{"S1", s1.Active, s1.Action, s1.Reason},
 		{"S2", s2.Active, s2.Action, s2.Reason},
 		{"S3", s3.Active, s3.Action, s3.Reason},
 		{"S4", s4.Active, s4.Action, s4.Reason},
-<<<<<<< HEAD
-	}
-	for _, c := range checks {
-		if c.active && c.action == masterAction {
-=======
 		{"S5", s5.Active, s5.Action, s5.Reason},
 	}
 	for _, sub := range subs {
 		if sub.active && sub.action == masterAction {
->>>>>>> zen-keller-l8bGb
 			agreeCount++
 			if advancedReasons != "" {
 				advancedReasons += " | "
 			}
-<<<<<<< HEAD
-			advancedReasons += fmt.Sprintf("%s: %s", c.name, c.reason)
-=======
 			advancedReasons += fmt.Sprintf("%s: %s", sub.name, sub.reason)
->>>>>>> zen-keller-l8bGb
 		}
 	}
 

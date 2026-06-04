@@ -87,32 +87,25 @@ func EvaluateS4MACD(candles4h []Candle) S4Signal {
 		sig.Active = true
 		sig.Action = ACTION_BUY
 		if bullZero {
-			sig.CrossType = "GoldenCross+ZeroLine"
 			sig.Reason = fmt.Sprintf("MACD golden cross AND zero-line cross — strong bullish shift. MACD=%.5f Sig=%.5f", cur.MACD, cur.Signal)
 		} else {
-			sig.CrossType = "GoldenCross"
 			sig.Reason = fmt.Sprintf("MACD golden cross: MACD crossed above signal line. MACD=%.5f Sig=%.5f", cur.MACD, cur.Signal)
 		}
 	} else if deathCross {
 		sig.Active = true
 		sig.Action = ACTION_SELL
 		if bearZero {
-			sig.CrossType = "DeathCross+ZeroLine"
 			sig.Reason = fmt.Sprintf("MACD death cross AND zero-line cross — strong bearish shift. MACD=%.5f Sig=%.5f", cur.MACD, cur.Signal)
 		} else {
-			sig.CrossType = "DeathCross"
 			sig.Reason = fmt.Sprintf("MACD death cross: MACD crossed below signal line. MACD=%.5f Sig=%.5f", cur.MACD, cur.Signal)
 		}
 	} else if bullZero && !goldenCross {
-		// MACD crossed zero but not signal — still bullish momentum signal
 		sig.Active = true
 		sig.Action = ACTION_BUY
-		sig.CrossType = "ZeroLineBull"
 		sig.Reason = fmt.Sprintf("MACD crossed above zero-line — momentum turning positive. MACD=%.5f", cur.MACD)
 	} else if bearZero && !deathCross {
 		sig.Active = true
 		sig.Action = ACTION_SELL
-		sig.CrossType = "ZeroLineBear"
 		sig.Reason = fmt.Sprintf("MACD crossed below zero-line — momentum turning negative. MACD=%.5f", cur.MACD)
 	}
 
