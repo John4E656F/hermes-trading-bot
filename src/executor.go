@@ -38,11 +38,11 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 	var riskPct float64
 	switch {
 	case confidence >= 0.80:
-		riskPct = 0.015 // 1.5 % of live wallet
+		riskPct = 0.030 // 3% per swing trade
 	case confidence >= 0.70:
-		riskPct = 0.010 // 1.0 % of live wallet
+		riskPct = 0.020 // 2%
 	default:
-		riskPct = 0.005 // 0.5 %  (confidence 0.60–0.69)
+		riskPct = 0.015 // 1.5% (confidence 0.60–0.69)
 	}
 
 	fmt.Printf("   📊 AI confidence = %.2f → Risk = %.1f%% of $%.2f wallet\n", confidence, riskPct*100, e.TotalCapital)
@@ -58,15 +58,19 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 	_, _ = e.Client.PostPrivateRequest("/v5/position/set-leverage", marginPayload)
 
 // 2. Risk Sizing Computations — uses dynamic riskPct from confidence
-		// ADX-aware SL width: ranging assets need wider stops, trends can be tight
+		// ADX-aware SL width: swing trading needs wider stops
 		var slMultiplier float64
+		var tpMultiplier float64
 		switch {
 		case dailyADX < 25:
-			slMultiplier = 4.0 // ranging/chop: wide SL to avoid noise stops
+			slMultiplier = 3.0 // ranging: wide SL to avoid noise
+			tpMultiplier = 6.0 // swing: 1:2 RR
 		case dailyADX < 40:
-			slMultiplier = 2.5 // moderate trend: medium SL
+			slMultiplier = 2.5 // moderate trend
+			tpMultiplier = 5.0 // swing: 1:2 RR
 		default:
-			slMultiplier = 2.0 // strong trend: tight SL, trend will protect
+			slMultiplier = 2.0 // strong trend: tighter SL
+			tpMultiplier = 5.0 // swing: big trend target
 		}
 		var stopLossPrice, takeProfitPrice, side string
 		atrDistance := atr * slMultiplier
@@ -83,11 +87,11 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 		if action == ACTION_BUY {
 			side = "Buy"
 			stopLossPrice = fmt.Sprintf("%.2f", price-atrDistance)
-			takeProfitPrice = fmt.Sprintf("%.2f", price+(atrDistance*2.5))
-		} else {
+			takeProfitPrice = fmt.Sprintf("%.2f", price+(atr*tpMultiplier))
+		} else if action == ACTION_SELL {
 			side = "Sell"
 			stopLossPrice = fmt.Sprintf("%.2f", price+atrDistance)
-			takeProfitPrice = fmt.Sprintf("%.2f", price-(atrDistance*2.5))
+			takeProfitPrice = fmt.Sprintf("%.2f", price-(atr*tpMultiplier))
 		}
 
 		// ESPORTS/penny-stock price protection: if TP/SL rounds to $0, use %-based fallback
@@ -113,11 +117,11 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 		if action == ACTION_BUY {
 			side = "Buy"
 			stopLossPrice = fmt.Sprintf("%.2f", price-atrDistance)
-			takeProfitPrice = fmt.Sprintf("%.2f", price+(atrDistance*2.5))
+			takeProfitPrice = fmt.Sprintf("%.2f", price+(atr*tpMultiplier))
 		} else if action == ACTION_SELL {
 			side = "Sell"
 			stopLossPrice = fmt.Sprintf("%.2f", price+atrDistance)
-			takeProfitPrice = fmt.Sprintf("%.2f", price-(atrDistance*2.5))
+			takeProfitPrice = fmt.Sprintf("%.2f", price-(atr*tpMultiplier))
 		} else {
 			return nil
 		}

@@ -1,19 +1,11 @@
-#!/usr/bin/env python3
-"""Get current ticker prices for candidates."""
-from pybit.unified_trading import HTTP
-import json
+import requests
 
-session = HTTP(testnet=False, recv_window=60000)
-
-symbols = ['FFUSDT', 'TRXUSDT', 'SAHARAUSDT', 'LABUSDT', 'HBARUSDT', 'SEIUSDT', 'HUSDT', 'XPLUSDT', 'ALGOUSDT', 'BSBUSDT', 'VVVUSDT', 'NEARUSDT', 'PLAYSOUTUSDT']
-
-for sym in symbols:
-    try:
-        resp = session.get_tickers(category='linear', symbol=sym)
-        if resp['retCode'] == 0:
-            t = resp['result']['list'][0]
-            print(f"{sym}: bid={t['bid1Price']} ask={t['ask1Price']} last={t['lastPrice']} high24h={t['highPrice24h']} low24h={t['lowPrice24h']}")
-        else:
-            print(f"{sym}: ERROR {resp}")
-    except Exception as e:
-        print(f"{sym}: EXCEPTION {e}")
+pairs = ['BNBUSDT', 'HYPEUSDT', 'PLAYSOUTUSDT', 'FFUSDT', 'BCHUSDT', 'HNTUSDT']
+for symbol in pairs:
+    resp = requests.get(f'https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}')
+    data = resp.json()
+    if data['retCode'] == 0:
+        t = data['result']['list'][0]
+        print(f"{symbol}: last={t['lastPrice']} bid={t['bid1Price']} ask={t['ask1Price']}")
+    else:
+        print(f"{symbol}: error {data}")
