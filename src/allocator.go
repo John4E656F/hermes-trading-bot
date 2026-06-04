@@ -229,11 +229,7 @@ S0:     s0,
 		agreeCount = 1
 	}
 
-<<<<<<< HEAD
-	type stratCheck struct {
-=======
 	type subSignal struct {
->>>>>>> zen-keller-l8bGb
 		name   string
 		active bool
 		action SignalAction
