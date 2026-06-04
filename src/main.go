@@ -392,15 +392,14 @@ func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive 
 			}
 		}
 
-		// ── Market Bias Filter: prioritize the dominant direction ──
+		// ── Market Bias Filter: signal-count based directional tilt ──
 		totalBuys := len(tradableBuys)
 		totalSells := len(tradableSells)
 		bearishBias := totalSells > totalBuys*2
 		bullishBias := totalBuys > totalSells*2
 		if bearishBias {
-			fmt.Printf("   🐻 BEARISH BIAS: %d sells vs %d buys. Reducing LONG ranks.\n",
+			fmt.Printf("   🐻 BEARISH BIAS: %d sells vs %d buys. Reducing LONG confidence.\n",
 				totalSells, totalBuys)
-			// Keep all positions, just cap LONG confidence
 			for i := range tradableBuys {
 				tradableBuys[i].Signal.Confidence *= 0.6
 				if tradableBuys[i].Signal.Conviction > 1 {
@@ -409,7 +408,7 @@ func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive 
 			}
 		}
 		if bullishBias {
-			fmt.Printf("   🐂 BULLISH BIAS: %d buys vs %d sells. Reducing SHORT ranks.\n",
+			fmt.Printf("   🐂 BULLISH BIAS: %d buys vs %d sells. Reducing SHORT confidence.\n",
 				totalBuys, totalSells)
 			for i := range tradableSells {
 				tradableSells[i].Signal.Confidence *= 0.6
@@ -419,22 +418,68 @@ func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive 
 			}
 		}
 
+		// ── BTC Macro Regime Filter ────────────────────────────────────
+		// BTC direction is the strongest single predictor of altcoin direction.
+		// In a BTC bear: only allow LONG trades if Conviction 3 (exceptional confluence).
+		// In a BTC bull: only allow SHORT trades if Conviction 3.
+		btcRegime := BTCNeutral
+		if btcAsset, ok := data.Assets["BTCUSDT"]; ok {
+			btcRegime = ComputeBTCRegime(btcAsset)
+			fmt.Printf("   %s — price=$%.0f RSI=%.0f ADX=%.0f\n",
+				BTCRegimeLabel(btcRegime),
+				btcAsset.CurrentPrice,
+				btcAsset.Snap1d.Indicators.RSI14,
+				btcAsset.Snap1d.Indicators.ADX14,
+			)
+		}
+		if btcRegime == BTCBear {
+			var allowed []RankedSignal
+			for _, c := range tradableBuys {
+				if c.Signal.Conviction >= 3 {
+					allowed = append(allowed, c)
+				} else {
+					fmt.Printf("   🔴 BTC BEAR: [%s] LONG Conv%d blocked — need Conv3 in bear market.\n",
+						c.Asset.Symbol, c.Signal.Conviction)
+				}
+			}
+			tradableBuys = allowed
+		} else if btcRegime == BTCBull {
+			var allowed []RankedSignal
+			for _, c := range tradableSells {
+				if c.Signal.Conviction >= 3 {
+					allowed = append(allowed, c)
+				} else {
+					fmt.Printf("   🟢 BTC BULL: [%s] SHORT Conv%d blocked — need Conv3 in bull market.\n",
+						c.Asset.Symbol, c.Signal.Conviction)
+				}
+			}
+			tradableSells = allowed
+		}
+
 		// Rank by conviction first (highest first), then |7D gain| as tiebreaker
 		sort.Slice(tradableBuys, func(i, j int) bool {
 			ci, cj := tradableBuys[i].Signal.Conviction, tradableBuys[j].Signal.Conviction
-			if ci != cj { return ci > cj }
+			if ci != cj {
+				return ci > cj
+			}
 			return tradableBuys[i].Gain7D > tradableBuys[j].Gain7D
 		})
 		sort.Slice(tradableSells, func(i, j int) bool {
 			ci, cj := tradableSells[i].Signal.Conviction, tradableSells[j].Signal.Conviction
-			if ci != cj { return ci > cj }
+			if ci != cj {
+				return ci > cj
+			}
 			return tradableSells[i].Gain7D < tradableSells[j].Gain7D
 		})
 
 		topLongs := tradableBuys
-		if len(topLongs) > 3 { topLongs = topLongs[:3] }
+		if len(topLongs) > 3 {
+			topLongs = topLongs[:3]
+		}
 		topShorts := tradableSells
-		if len(topShorts) > 3 { topShorts = topShorts[:3] }
+		if len(topShorts) > 3 {
+			topShorts = topShorts[:3]
+		}
 
 		var filtered []RankedSignal
 		filtered = append(filtered, topLongs...)
@@ -443,46 +488,53 @@ func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive 
 		// Final sort: conviction first, then |gain|
 		sort.Slice(filtered, func(i, j int) bool {
 			ci, cj := filtered[i].Signal.Conviction, filtered[j].Signal.Conviction
-			if ci != cj { return ci > cj }
+			if ci != cj {
+				return ci > cj
+			}
 			return math.Abs(filtered[i].Gain7D) > math.Abs(filtered[j].Gain7D)
 		})
-
 		if len(filtered) > 3 {
 			filtered = filtered[:3]
 		}
 
-		// ── Drawdown Circuit Breaker ──
-		peakCapital := 103.0 // highest wallet seen
-		if data.LiveBalance < peakCapital*0.85 {
-			fmt.Printf("🚨 DRAWDOWN LIMIT REACHED: $%.2f < 85%% of peak $%.2f. Blocking ALL entries.\n", data.LiveBalance, peakCapital)
-		} else {
-			// Normal trading flow inside this else block
+		// ── Tiered Capital Protection ─────────────────────────────────
+		// Scales min conviction with wallet size — bot can still trade back on
+		// high-quality setups instead of being permanently frozen at $103 peak.
+		minConviction := 2
+		capitalBlocked := false
+		switch {
+		case data.LiveBalance < 20.0:
+			capitalBlocked = true
+			fmt.Printf("CIRCUIT BREAKER: $%.2f USDT — below $20 minimum. ALL entries halted.\n", data.LiveBalance)
+		case data.LiveBalance < 50.0:
+			minConviction = 3
+			fmt.Printf("CAPITAL PRESERVATION: $%.2f < $50 — only Conviction 3 (META) signals allowed.\n", data.LiveBalance)
+		case data.LiveBalance < 75.0:
+			fmt.Printf("CAUTION MODE: $%.2f < $75 — Conviction 2+ required.\n", data.LiveBalance)
+		default:
+			fmt.Printf("NORMAL TRADING: $%.2f — all Conviction 2+ signals active.\n", data.LiveBalance)
+		}
 
-		for _, c := range filtered {
-			asset := c.Asset
-			sig := c.Signal
+		if !capitalBlocked {
+			for _, c := range filtered {
+				asset := c.Asset
+				sig := c.Signal
 
-			// Execution threshold: Conviction >= 2 AND Confidence >= 0.70.
-			// Conviction 1 signals are logged only — never executed.
-			if sig.Conviction < 2 || sig.Confidence < 0.70 {
-				fmt.Printf("   📋 [%s] Conv%d/%.0f%% — below execution threshold. Logged only.\n",
-					asset.Symbol, sig.Conviction, sig.Confidence*100)
-				continue
-			}
+				if sig.Conviction < minConviction || sig.Confidence < 0.70 {
+					fmt.Printf("   [%s] Conv%d/%.0f%% — below threshold (need Conv%d/70%%). Logged only.\n",
+						asset.Symbol, sig.Conviction, sig.Confidence*100, minConviction)
+					continue
+				}
 
-			fmt.Printf("💡 [%s] Conv%d/%.0f%% (%s) — executing.\n",
-				asset.Symbol, sig.Conviction, sig.Confidence*100, sig.Strategy)
-			err := exec.ExecuteBracketTrade(
-				asset.Symbol, sig.Action, asset.CurrentPrice,
-				asset.Snap4h.Indicators.ATR14, sig.Confidence,
-				asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles,
-			)
-			if err != nil {
-				fmt.Printf("   ❌ Execution failed: %v\n\n", err)
+				fmt.Printf("[%s] Conv%d/%.0f%% (%s) — executing.\n",
+					asset.Symbol, sig.Conviction, sig.Confidence*100, sig.Strategy)
+				if err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice,
+					asset.Snap4h.Indicators.ATR14, sig.Confidence,
+					asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles); err != nil {
+					fmt.Printf("   Execution failed: %v\n\n", err)
+				}
 			}
 		}
-	}
-	// End drawdown circuit-breaker
 	}
 	fmt.Println("=========================================================================================")
 }

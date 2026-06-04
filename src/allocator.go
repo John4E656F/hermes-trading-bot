@@ -185,7 +185,6 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	// S0 uses Williams%R + VWAP instead of just RSI for better accuracy.
 	s0 := S0Signal{Active: false}
 	if masterAction == ACTION_BUY {
-		// Confirmed bullish: price above VWAP, Williams%R leaving oversold
 		aboveVWAP := vwap20 == 0 || latestPrice > vwap20
 		if rsi14 > 50 && latestPrice > ema20 && aboveVWAP && wrPct < -40 {
 			s0 = S0Signal{Active: true, Action: ACTION_BUY,
@@ -193,6 +192,9 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		} else if dailyADX > 40 {
 			s0 = S0Signal{Active: true, Action: ACTION_BUY,
 				Reason: fmt.Sprintf("Strong trend bypass (ADX %.0f>40) — S0 confirmed.", dailyADX)}
+		} else if rsi14 < 32 && volRatio >= 1.5 {
+			s0 = S0Signal{Active: true, Action: ACTION_BUY,
+				Reason: fmt.Sprintf("Oversold reversal: RSI %.0f<32 + vol surge %.1fx.", rsi14, volRatio)}
 		}
 	} else if masterAction == ACTION_SELL {
 		belowVWAP := vwap20 == 0 || latestPrice < vwap20
@@ -202,8 +204,12 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		} else if dailyADX > 40 {
 			s0 = S0Signal{Active: true, Action: ACTION_SELL,
 				Reason: fmt.Sprintf("Strong trend bypass (ADX %.0f>40) — S0 confirmed.", dailyADX)}
+		} else if rsi14 > 68 && volRatio >= 1.5 {
+			s0 = S0Signal{Active: true, Action: ACTION_SELL,
+				Reason: fmt.Sprintf("Overbought rejection: RSI %.0f>68 + vol surge %.1fx.", rsi14, volRatio)}
 		}
 	}
+
 
 	signal := StrategySignal{
 		Symbol: asset.Symbol,
@@ -217,8 +223,8 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		S5:     s5,
 	}
 
-	// ── Conviction Scoring ────────────────────────────────────────────
-	// Base: 1 if S0 verified independently. +1 per agreeing sub-strategy.
+	// Conviction Scoring: S0 = 1 base point; each agreeing sub-strategy adds 1.
+
 	agreeCount := 0
 	advancedReasons := ""
 
