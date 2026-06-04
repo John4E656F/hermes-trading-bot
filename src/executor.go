@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -15,6 +16,7 @@ const (
 
 type ExecutionEngine struct {
 	Client       *BybitClient
+	AI           *AIClient
 	MaxLeverage  int
 	TotalCapital float64
 }
@@ -22,18 +24,72 @@ type ExecutionEngine struct {
 func NewExecutionEngine(client *BybitClient, capital float64) *ExecutionEngine {
 	return &ExecutionEngine{
 		Client:       client,
+		AI:           NewAIClient(),
 		MaxLeverage:  3,
 		TotalCapital: capital,
 	}
 }
 
-// ExecuteBracketTrade places a bracket order (entry + SL + TP) and immediately
-// registers a break-even conditional order so profits are protected once 1R is gained.
-func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction, price, atr, confidence, dailyADX float64, candles4h []Candle) error {
-	fmt.Printf("🛡️ Executor: %s %s @ $%.4f (conf=%.0f%%, ADX=%.1f)\n", action, symbol, price, confidence*100, dailyADX)
+// ExecuteBracketTrade places a limit bracket order (entry + SL + TP) after passing
+// an AI validation gate. Every signal — executed or rejected — is written to trade_log.jsonl
+// so we can audit quality and improve over time.
+func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSnapshot) error {
+	symbol := sig.Symbol
+	action := sig.Action
+	price := asset.CurrentPrice
+	atr := asset.Snap4h.Indicators.ATR14
+	confidence := sig.Confidence
+	dailyADX := asset.Snap1d.Indicators.ADX14
+	candles4h := asset.Snap4h.Candles
+
+	fmt.Printf("🛡️ Executor: %s %s @ $%.4f (conv=%d conf=%.0f%% ADX=%.1f)\n",
+		action, symbol, price, sig.Conviction, confidence*100, dailyADX)
 
 	if confidence < 0.70 {
 		return fmt.Errorf("ABORT: confidence %.2f below execution floor 0.70", confidence)
+	}
+
+	// ── Build trade log skeleton (filled in as we progress) ──────────
+	entry := TradeLogEntry{
+		Timestamp:   time.Now().UTC(),
+		Symbol:      symbol,
+		Side:        string(action),
+		OrderType:   "Limit",
+		EntryPrice:  price,
+		ATR:         atr,
+		ADX:         dailyADX,
+		RSI:         asset.Snap4h.Indicators.RSI14,
+		WilliamsR:   asset.Snap4h.Indicators.WilliamsR,
+		BBWidth:     asset.Snap4h.Indicators.BBWidth,
+		FundingRate: asset.Funding.CurrentRate,
+		S4Active:    sig.S4.Active,
+		S5Active:    sig.S5.Active,
+		Conviction:  sig.Conviction,
+		Confidence:  confidence,
+		Strategy:    sig.Strategy,
+		Reason:      sig.Reason,
+		WalletBal:   e.TotalCapital,
+	}
+
+	// ── AI Validation Gate ────────────────────────────────────────────
+	// Always log the AI opinion whether we proceed or not.
+	aiResult, aiErr := e.AI.ValidateSignal(sig, asset)
+	if aiErr != nil {
+		fmt.Printf("   ⚠️ AI gate unavailable (%v) — proceeding on local signal.\n", aiErr)
+		entry.AIVerdict = "UNAVAILABLE"
+		entry.AIReason = aiErr.Error()
+	} else {
+		entry.AIVerdict = aiResult.Verdict
+		entry.AIConfidence = aiResult.Confidence
+		entry.AIReason = aiResult.Explanation
+		fmt.Printf("   🤖 AI: %s (%.0f%%) — %s\n",
+			aiResult.Verdict, aiResult.Confidence*100, aiResult.Explanation)
+		if aiResult.Verdict == "REJECTED" {
+			entry.Executed = false
+			entry.SkipReason = "AI rejected: " + aiResult.Explanation
+			AppendTradeLog(entry)
+			return fmt.Errorf("AI GATE: signal rejected — %s", aiResult.Explanation)
+		}
 	}
 
 	// ── Dynamic risk sizing by confidence ────────────────────────────
@@ -46,6 +102,7 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 	default:
 		riskPct = 0.015 // 1.5% — baseline Conv2/70%
 	}
+	entry.RiskPct = riskPct
 
 	// ── ADX-aware SL/TP multipliers ───────────────────────────────────
 	var slMult, tpMult float64
@@ -63,28 +120,29 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 	atrDist := atr * slMult
 
 	// ── Fee-adjusted minimum R:R gate ────────────────────────────────
-	// Round-trip fee + estimated slippage = ~0.20% of position value.
-	// TP distance must be >= 3× the fee cost to have a positive expected value.
-	roundTripFriction := price * (TAKER_FEE_RATE*2 + 0.001) // fee + slippage
+	roundTripFriction := price * (TAKER_FEE_RATE*2 + 0.001)
 	if atrDist < roundTripFriction*3 {
+		entry.Executed = false
+		entry.SkipReason = fmt.Sprintf("FEE GATE: SL dist $%.4f < 3× friction $%.4f", atrDist, roundTripFriction*3)
+		AppendTradeLog(entry)
 		return fmt.Errorf("FEE GATE: SL distance $%.4f < 3× friction cost $%.4f — insufficient R:R after fees",
 			atrDist, roundTripFriction*3)
 	}
 
 	// ── Set Isolated Margin ───────────────────────────────────────────
 	e.Client.PostPrivateRequest("/v5/position/set-leverage", map[string]interface{}{
-		"category": "linear", "symbol": symbol,
-		"tradeMode": 1,
+		"category":     "linear",
+		"symbol":       symbol,
+		"tradeMode":    1,
 		"buyLeverage":  strconv.Itoa(e.MaxLeverage),
 		"sellLeverage": strconv.Itoa(e.MaxLeverage),
 	})
 
 	// ── Position sizing ───────────────────────────────────────────────
-	var stopLossPrice, takeProfitPrice, side string
+	var stopLossPrice, takeProfitPrice, limitPriceStr, side string
 	var positionSizeTokens float64
 
 	if e.TotalCapital < 20.0 {
-		// Micro-wallet: go in at minimum viable size
 		posUSD := math.Max(MIN_ORDER_USD, math.Min(e.TotalCapital*0.85, 10.0))
 		positionSizeTokens = posUSD / price
 	} else {
@@ -97,10 +155,12 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 		side = "Buy"
 		stopLossPrice = fmt.Sprintf("%.4f", price-atrDist)
 		takeProfitPrice = fmt.Sprintf("%.4f", price+(atr*tpMult))
+		limitPriceStr = fmt.Sprintf("%.4f", price)
 	case ACTION_SELL:
 		side = "Sell"
 		stopLossPrice = fmt.Sprintf("%.4f", price+atrDist)
 		takeProfitPrice = fmt.Sprintf("%.4f", price-(atr*tpMult))
+		limitPriceStr = fmt.Sprintf("%.4f", price)
 	default:
 		return nil
 	}
@@ -118,10 +178,13 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 		if info.PriceStep > 0 {
 			tpVal, _ := strconv.ParseFloat(takeProfitPrice, 64)
 			slVal, _ := strconv.ParseFloat(stopLossPrice, 64)
+			limVal, _ := strconv.ParseFloat(limitPriceStr, 64)
 			tpVal = math.Floor(tpVal/info.PriceStep) * info.PriceStep
 			slVal = math.Floor(slVal/info.PriceStep) * info.PriceStep
+			limVal = math.Floor(limVal/info.PriceStep) * info.PriceStep
 			takeProfitPrice = strconv.FormatFloat(tpVal, 'f', -1, 64)
 			stopLossPrice = strconv.FormatFloat(slVal, 'f', -1, 64)
+			limitPriceStr = strconv.FormatFloat(limVal, 'f', -1, 64)
 		}
 	} else {
 		switch {
@@ -136,6 +199,9 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 	}
 
 	if qtyStr == "" || qtyStr == "0" {
+		entry.Executed = false
+		entry.SkipReason = "position sizing yielded zero contracts"
+		AppendTradeLog(entry)
 		return fmt.Errorf("position sizing yielded zero contracts for %s", symbol)
 	}
 
@@ -148,6 +214,9 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 		if newQty := math.Min(orderValue*scaleFactor/price, maxFromCapital); newQty*price >= MIN_ORDER_USD {
 			qtyStr = strconv.FormatFloat(newQty, 'f', -1, 64)
 		} else {
+			entry.Executed = false
+			entry.SkipReason = fmt.Sprintf("order value $%.2f below minimum and wallet too small", orderValue)
+			AppendTradeLog(entry)
 			return fmt.Errorf("order value $%.2f below minimum $%.2f and wallet too small to scale", orderValue, MIN_ORDER_USD)
 		}
 	}
@@ -158,24 +227,35 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 		actualRisk := math.Abs(price-slPrice) * positionSizeTokens
 		targetRisk := e.TotalCapital * riskPct
 		if actualRisk > targetRisk*1.5 {
+			entry.Executed = false
+			entry.SkipReason = fmt.Sprintf("SIZE GUARD: actual SL risk $%.2f > 1.5× target $%.2f", actualRisk, targetRisk)
+			AppendTradeLog(entry)
 			return fmt.Errorf("SIZE GUARD: actual SL risk $%.2f > 1.5× target $%.2f", actualRisk, targetRisk)
 		}
 	}
 
-	// ── Place bracket order ───────────────────────────────────────────
-	fmt.Printf("   📐 qty=%s | SL=%s | TP=%s | risk_pct=%.1f%%\n", qtyStr, stopLossPrice, takeProfitPrice, riskPct*100)
+	fmt.Printf("   📐 qty=%s limit=%s | SL=%s | TP=%s | risk=%.1f%%\n",
+		qtyStr, limitPriceStr, stopLossPrice, takeProfitPrice, riskPct*100)
 
+	// ── Place limit bracket order ─────────────────────────────────────
 	respBytes, err := e.Client.PostPrivateRequest("/v5/order/create", map[string]interface{}{
 		"category":    "linear",
 		"symbol":      symbol,
 		"side":        side,
-		"orderType":   "Market",
+		"orderType":   "Limit",
+		"price":       limitPriceStr,
 		"qty":         qtyStr,
 		"timeInForce": "GTC",
 		"takeProfit":  takeProfitPrice,
 		"stopLoss":    stopLossPrice,
 	})
 	if err != nil {
+		entry.Executed = false
+		entry.SkipReason = "API error: " + err.Error()
+		entry.Qty = qtyStr
+		entry.StopLoss = stopLossPrice
+		entry.TakeProfit = takeProfitPrice
+		AppendTradeLog(entry)
 		return err
 	}
 
@@ -184,9 +264,18 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 		RetMsg  string `json:"retMsg"`
 	}
 	if err := json.Unmarshal(respBytes, &orderRes); err != nil {
+		entry.Executed = false
+		entry.SkipReason = "response parse error: " + err.Error()
+		AppendTradeLog(entry)
 		return err
 	}
 	if orderRes.RetCode != 0 {
+		entry.Executed = false
+		entry.SkipReason = fmt.Sprintf("Bybit rejected: %s (code %d)", orderRes.RetMsg, orderRes.RetCode)
+		entry.Qty = qtyStr
+		entry.StopLoss = stopLossPrice
+		entry.TakeProfit = takeProfitPrice
+		AppendTradeLog(entry)
 		return fmt.Errorf("bybit rejected order: %s (code %d)", orderRes.RetMsg, orderRes.RetCode)
 	}
 
@@ -209,6 +298,15 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 		}
 	}
 
-	fmt.Printf("✅ ORDER PLACED: %s %s qty=%s | SL=$%s TP=$%s\n", side, symbol, qtyStr, stopLossPrice, takeProfitPrice)
+	// ── Log successful trade ──────────────────────────────────────────
+	entry.Qty = qtyStr
+	entry.StopLoss = stopLossPrice
+	entry.TakeProfit = takeProfitPrice
+	entry.RiskPct = riskPct
+	entry.Executed = true
+	AppendTradeLog(entry)
+
+	fmt.Printf("✅ LIMIT ORDER PLACED: %s %s qty=%s limit=$%s | SL=$%s TP=$%s\n",
+		side, symbol, qtyStr, limitPriceStr, stopLossPrice, takeProfitPrice)
 	return nil
 }

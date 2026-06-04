@@ -533,9 +533,7 @@ func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive 
 
 				fmt.Printf("[%s] Conv%d/%.0f%% (%s) — executing.\n",
 					asset.Symbol, sig.Conviction, sig.Confidence*100, sig.Strategy)
-				if err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice,
-					asset.Snap4h.Indicators.ATR14, sig.Confidence,
-					asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles); err != nil {
+				if err := exec.ExecuteBracketTrade(sig, asset); err != nil {
 					fmt.Printf("   Execution failed: %v\n\n", err)
 				}
 			}
