@@ -58,19 +58,22 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 	_, _ = e.Client.PostPrivateRequest("/v5/position/set-leverage", marginPayload)
 
 // 2. Risk Sizing Computations — uses dynamic riskPct from confidence
-		// ADX-aware SL width: swing trading needs wider stops
+		// ADX-aware SL/TP: tighter SL means better RR
+		// Ranging (ADX<25): 2x ATR SL, 6x ATR TP → 1:3 RR (need 25% win rate to break even)
+		// Mixed  (25-40):  2x ATR SL, 5x ATR TP → 1:2.5 RR (need 29% win rate)
+		// Trend  (ADX>40): 1.5x ATR SL, 5x ATR TP → 1:3.3 RR (need 23% win rate)
 		var slMultiplier float64
 		var tpMultiplier float64
 		switch {
 		case dailyADX < 25:
-			slMultiplier = 3.0 // ranging: wide SL to avoid noise
-			tpMultiplier = 6.0 // swing: 1:2 RR
+			slMultiplier = 2.0
+			tpMultiplier = 6.0
 		case dailyADX < 40:
-			slMultiplier = 2.5 // moderate trend
-			tpMultiplier = 5.0 // swing: 1:2 RR
+			slMultiplier = 2.0
+			tpMultiplier = 5.0
 		default:
-			slMultiplier = 2.0 // strong trend: tighter SL
-			tpMultiplier = 5.0 // swing: big trend target
+			slMultiplier = 1.5
+			tpMultiplier = 5.0
 		}
 		var stopLossPrice, takeProfitPrice, side string
 		atrDistance := atr * slMultiplier
@@ -86,24 +89,24 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 
 		if action == ACTION_BUY {
 			side = "Buy"
-			stopLossPrice = fmt.Sprintf("%.2f", price-atrDistance)
-			takeProfitPrice = fmt.Sprintf("%.2f", price+(atr*tpMultiplier))
+			stopLossPrice = strconv.FormatFloat(price-atrDistance, 'f', 8, 64)
+			takeProfitPrice = strconv.FormatFloat(price+(atr*tpMultiplier), 'f', 8, 64)
 		} else if action == ACTION_SELL {
 			side = "Sell"
-			stopLossPrice = fmt.Sprintf("%.2f", price+atrDistance)
-			takeProfitPrice = fmt.Sprintf("%.2f", price-(atr*tpMultiplier))
+			stopLossPrice = strconv.FormatFloat(price+atrDistance, 'f', 8, 64)
+			takeProfitPrice = strconv.FormatFloat(price-(atr*tpMultiplier), 'f', 8, 64)
 		}
 
-		// ESPORTS/penny-stock price protection: if TP/SL rounds to $0, use %-based fallback
-		if tpVal, _ := strconv.ParseFloat(takeProfitPrice, 64); tpVal <= 0.01 {
+		// Penny-stock price protection: if TP/SL is zero after precision loss, use %-based fallback
+		if tpVal, _ := strconv.ParseFloat(takeProfitPrice, 64); tpVal <= 0 {
 			if action == ACTION_SELL {
-				takeProfitPrice = fmt.Sprintf("%.2f", price*0.5) // short: TP below entry
+				takeProfitPrice = strconv.FormatFloat(price*0.5, 'f', 8, 64)
 			} else {
-				takeProfitPrice = fmt.Sprintf("%.2f", price*1.5) // long: TP above entry
+				takeProfitPrice = strconv.FormatFloat(price*1.5, 'f', 8, 64)
 			}
 		}
-		if slVal, _ := strconv.ParseFloat(stopLossPrice, 64); slVal <= 0.001 {
-			stopLossPrice = fmt.Sprintf("%.2f", price*0.5)
+		if slVal, _ := strconv.ParseFloat(stopLossPrice, 64); slVal <= 0 {
+			stopLossPrice = strconv.FormatFloat(price*0.5, 'f', 8, 64)
 		}
 
 		fmt.Printf("   📊 (Micro-wallet mode) position=$%.2f SL=%s TP=%s\n",
@@ -116,12 +119,12 @@ func (e *ExecutionEngine) ExecuteBracketTrade(symbol string, action SignalAction
 
 		if action == ACTION_BUY {
 			side = "Buy"
-			stopLossPrice = fmt.Sprintf("%.2f", price-atrDistance)
-			takeProfitPrice = fmt.Sprintf("%.2f", price+(atr*tpMultiplier))
+			stopLossPrice = strconv.FormatFloat(price-atrDistance, 'f', 8, 64)
+			takeProfitPrice = strconv.FormatFloat(price+(atr*tpMultiplier), 'f', 8, 64)
 		} else if action == ACTION_SELL {
 			side = "Sell"
-			stopLossPrice = fmt.Sprintf("%.2f", price+atrDistance)
-			takeProfitPrice = fmt.Sprintf("%.2f", price-(atr*tpMultiplier))
+			stopLossPrice = strconv.FormatFloat(price+atrDistance, 'f', 8, 64)
+			takeProfitPrice = strconv.FormatFloat(price-(atr*tpMultiplier), 'f', 8, 64)
 		} else {
 			return nil
 		}

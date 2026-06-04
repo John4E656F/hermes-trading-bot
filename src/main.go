@@ -315,7 +315,7 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 		allCandidates := append(buyCandidates, sellCandidates...)
-		fmt.Printf("%-10s %-12s %-10s  %-22s  %-10s\n", "SYMBOL", "ADX(1D)", "VOLUME SURGE", "7D GAIN")
+		fmt.Printf("%-10s %-12s %-10s  %-22s\n", "SYMBOL", "ADX(1D)", "VOLUME SURGE", "7D GAIN")
 		for _, c := range allCandidates {
 			asset := c.Asset
 			avgVol := CalculateVolumeMA(asset.Snap4h.Candles, 20)
@@ -379,15 +379,14 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 			}
 		}
 
-		// ── Market Bias Filter: prioritize the dominant direction ──
+		// ── Market Bias Filter: signal-count based directional tilt ──
 		totalBuys := len(tradableBuys)
 		totalSells := len(tradableSells)
 		bearishBias := totalSells > totalBuys*2
 		bullishBias := totalBuys > totalSells*2
 		if bearishBias {
-			fmt.Printf("   🐻 BEARISH BIAS: %d sells vs %d buys. Reducing LONG ranks.\n",
+			fmt.Printf("   🐻 BEARISH BIAS: %d sells vs %d buys. Reducing LONG confidence.\n",
 				totalSells, totalBuys)
-			// Keep all positions, just cap LONG confidence
 			for i := range tradableBuys {
 				tradableBuys[i].Signal.Confidence *= 0.6
 				if tradableBuys[i].Signal.Conviction > 1 {
@@ -396,7 +395,7 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 			}
 		}
 		if bullishBias {
-			fmt.Printf("   🐂 BULLISH BIAS: %d buys vs %d sells. Reducing SHORT ranks.\n",
+			fmt.Printf("   🐂 BULLISH BIAS: %d buys vs %d sells. Reducing SHORT confidence.\n",
 				totalBuys, totalSells)
 			for i := range tradableSells {
 				tradableSells[i].Signal.Confidence *= 0.6
@@ -406,22 +405,68 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 			}
 		}
 
+		// ── BTC Macro Regime Filter ────────────────────────────────────
+		// BTC direction is the strongest single predictor of altcoin direction.
+		// In a BTC bear: only allow LONG trades if Conviction 3 (exceptional confluence).
+		// In a BTC bull: only allow SHORT trades if Conviction 3.
+		btcRegime := BTCNeutral
+		if btcAsset, ok := data.Assets["BTCUSDT"]; ok {
+			btcRegime = ComputeBTCRegime(btcAsset)
+			fmt.Printf("   %s — price=$%.0f RSI=%.0f ADX=%.0f\n",
+				BTCRegimeLabel(btcRegime),
+				btcAsset.CurrentPrice,
+				btcAsset.Snap1d.Indicators.RSI14,
+				btcAsset.Snap1d.Indicators.ADX14,
+			)
+		}
+		if btcRegime == BTCBear {
+			var allowed []RankedSignal
+			for _, c := range tradableBuys {
+				if c.Signal.Conviction >= 3 {
+					allowed = append(allowed, c)
+				} else {
+					fmt.Printf("   🔴 BTC BEAR: [%s] LONG Conv%d blocked — need Conv3 in bear market.\n",
+						c.Asset.Symbol, c.Signal.Conviction)
+				}
+			}
+			tradableBuys = allowed
+		} else if btcRegime == BTCBull {
+			var allowed []RankedSignal
+			for _, c := range tradableSells {
+				if c.Signal.Conviction >= 3 {
+					allowed = append(allowed, c)
+				} else {
+					fmt.Printf("   🟢 BTC BULL: [%s] SHORT Conv%d blocked — need Conv3 in bull market.\n",
+						c.Asset.Symbol, c.Signal.Conviction)
+				}
+			}
+			tradableSells = allowed
+		}
+
 		// Rank by conviction first (highest first), then |7D gain| as tiebreaker
 		sort.Slice(tradableBuys, func(i, j int) bool {
 			ci, cj := tradableBuys[i].Signal.Conviction, tradableBuys[j].Signal.Conviction
-			if ci != cj { return ci > cj }
+			if ci != cj {
+				return ci > cj
+			}
 			return tradableBuys[i].Gain7D > tradableBuys[j].Gain7D
 		})
 		sort.Slice(tradableSells, func(i, j int) bool {
 			ci, cj := tradableSells[i].Signal.Conviction, tradableSells[j].Signal.Conviction
-			if ci != cj { return ci > cj }
+			if ci != cj {
+				return ci > cj
+			}
 			return tradableSells[i].Gain7D < tradableSells[j].Gain7D
 		})
 
 		topLongs := tradableBuys
-		if len(topLongs) > 3 { topLongs = topLongs[:3] }
+		if len(topLongs) > 3 {
+			topLongs = topLongs[:3]
+		}
 		topShorts := tradableSells
-		if len(topShorts) > 3 { topShorts = topShorts[:3] }
+		if len(topShorts) > 3 {
+			topShorts = topShorts[:3]
+		}
 
 		var filtered []RankedSignal
 		filtered = append(filtered, topLongs...)
@@ -430,54 +475,78 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 		// Final sort: conviction first, then |gain|
 		sort.Slice(filtered, func(i, j int) bool {
 			ci, cj := filtered[i].Signal.Conviction, filtered[j].Signal.Conviction
-			if ci != cj { return ci > cj }
+			if ci != cj {
+				return ci > cj
+			}
 			return math.Abs(filtered[i].Gain7D) > math.Abs(filtered[j].Gain7D)
 		})
-
 		if len(filtered) > 3 {
 			filtered = filtered[:3]
 		}
 
-		// ── Drawdown Circuit Breaker ──
-		peakCapital := 103.0 // highest wallet seen
-		if data.LiveBalance < peakCapital*0.85 {
-			fmt.Printf("🚨 DRAWDOWN LIMIT REACHED: $%.2f < 85%% of peak $%.2f. Blocking ALL entries.\n", data.LiveBalance, peakCapital)
-		} else {
-			// Normal trading flow inside this else block
-
-		for _, c := range filtered {
-			asset := c.Asset
-			sig := c.Signal // USE THE STORED SIGNAL (bias-filtered already)
-
-			if sig.Conviction >= 2 && sig.Confidence >= 0.70 {
-				fmt.Printf("💡 [%s] Local confidence=%.0f%% (Conviction %d) — bypassing AI, executing directly.\n", asset.Symbol, sig.Confidence*100, sig.Conviction)
-err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice, asset.Snap4h.Indicators.ATR14, sig.Confidence, asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles)
-			if err != nil {
-				fmt.Printf("   ❌ Order Execution Failure: %v\n\n", err)
-			}
-			continue
+		// ── Tiered Capital Protection ─────────────────────────────────
+		// Replaces hardcoded $103 peak. Scales minimum conviction requirement
+		// with wallet size so the bot can still trade its way back on high-quality
+		// setups instead of being permanently frozen.
+		minConviction := 2
+		capitalBlocked := false
+		switch {
+		case data.LiveBalance < 20.0:
+			capitalBlocked = true
+			fmt.Printf("🚨 CIRCUIT BREAKER: $%.2f USDT — below $20 minimum. ALL entries halted.\n", data.LiveBalance)
+		case data.LiveBalance < 50.0:
+			minConviction = 3
+			fmt.Printf("🔴 CAPITAL PRESERVATION: $%.2f < $50 — only Conviction 3 (META) signals allowed.\n", data.LiveBalance)
+		case data.LiveBalance < 75.0:
+			minConviction = 2
+			fmt.Printf("🟡 CAUTION MODE: $%.2f < $75 — Conviction 2+ required.\n", data.LiveBalance)
+		default:
+			fmt.Printf("🟢 NORMAL TRADING: $%.2f — all Conviction 2+ signals active.\n", data.LiveBalance)
 		}
 
-		fmt.Printf("💡 [%s] Active trade setup found! Initiating OpenRouter AI Verification layer...\n", asset.Symbol)
-		aiResp, err := ai.ValidateSignal(sig, asset.CurrentPrice, asset.Snap4h.Indicators.RSI14, asset.Snap4h.Indicators.ATR14)
-		if err != nil {
-			fmt.Printf("   ❌ AI Gateway Error: %v\n\n", err)
-			continue
-		}
-		fmt.Printf("   🤖 AI VERDICT: [%s] (Confidence: %.2f)\n", aiResp.Verdict, aiResp.Confidence)
+		if !capitalBlocked {
+			for _, c := range filtered {
+				asset := c.Asset
+				sig := c.Signal
 
-		if aiResp.Verdict == "CONFIRMED" {
-			fmt.Println("   💸 Signal authorized by AI. Passing transaction payload to Bybit...")
-			err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice, asset.Snap4h.Indicators.ATR14, aiResp.Confidence, asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles)
-				if err != nil {
-					fmt.Printf("   ❌ Order Execution Failure: %v\n\n", err)
+				if sig.Conviction < minConviction {
+					fmt.Printf("   ⏭️  [%s] Skipped: Conviction %d < %d required in current capital mode.\n",
+						asset.Symbol, sig.Conviction, minConviction)
+					continue
 				}
-			} else {
-				fmt.Println("   🛡️ Signal REJECTED by AI risk layer. Order routing halted.")
+
+				if sig.Conviction >= 2 && sig.Confidence >= 0.70 {
+					fmt.Printf("💡 [%s] Conviction %d / %.0f%% — bypassing AI, executing directly.\n",
+						asset.Symbol, sig.Conviction, sig.Confidence*100)
+					if err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice,
+						asset.Snap4h.Indicators.ATR14, sig.Confidence,
+						asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles); err != nil {
+						fmt.Printf("   ❌ Order Execution Failure: %v\n\n", err)
+					}
+					continue
+				}
+
+				fmt.Printf("💡 [%s] Conviction %d — routing through AI validation layer...\n",
+					asset.Symbol, sig.Conviction)
+				aiResp, err := ai.ValidateSignal(sig, asset.CurrentPrice,
+					asset.Snap4h.Indicators.RSI14, asset.Snap4h.Indicators.ATR14)
+				if err != nil {
+					fmt.Printf("   ❌ AI Gateway Error: %v\n\n", err)
+					continue
+				}
+				fmt.Printf("   🤖 AI VERDICT: [%s] (Confidence: %.2f)\n", aiResp.Verdict, aiResp.Confidence)
+				if aiResp.Verdict == "CONFIRMED" {
+					fmt.Println("   💸 Signal authorized by AI. Routing to Bybit...")
+					if err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice,
+						asset.Snap4h.Indicators.ATR14, aiResp.Confidence,
+						asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles); err != nil {
+						fmt.Printf("   ❌ Order Execution Failure: %v\n\n", err)
+					}
+				} else {
+					fmt.Println("   🛡️ Signal REJECTED by AI risk layer. Order routing halted.")
+				}
 			}
 		}
-	}
-	// Close drawdown circuit-breaker else block
 	}
 	fmt.Println("=========================================================================================")
 }
