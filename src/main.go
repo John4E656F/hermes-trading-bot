@@ -278,20 +278,36 @@ func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive 
 		freezeBanner = " ❄️ FROZEN"
 	}
 
+	// Evaluate all signals first so we can pass them to the stale-order auditor.
+	signalMap := make(map[string]StrategySignal, len(watchlist))
 	for _, symbol := range watchlist {
 		asset, exists := data.Assets[symbol]
 		if !exists {
 			continue
 		}
-
 		sig := EvaluateMarketSnapshot(asset)
-
 		if forceActive {
 			sig.Action = ACTION_BUY
 			sig.Reason = "FORCED DIAGNOSTIC SIMULATION OVERRIDE"
 			sig.Conviction = 1
 			sig.Confidence = 0.60
 		}
+		signalMap[symbol] = sig
+	}
+
+	// Cancel any open limit orders whose signal has reversed or gone HOLD.
+	// Returns symbols that still have a valid open order (to prevent double-entry).
+	var openOrderMap map[string]string
+	if !scanMode {
+		openOrderMap = ManageStaleLimitOrders(exec.Client, signalMap)
+	}
+
+	for _, symbol := range watchlist {
+		asset, exists := data.Assets[symbol]
+		if !exists {
+			continue
+		}
+		sig := signalMap[symbol]
 
 		fmt.Printf("%-10s | %-12d | %-10.2f | %-22s | %-6s%s\n",
 			asset.Symbol,
@@ -308,12 +324,14 @@ func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive 
 		if sig.Action == ACTION_BUY {
 			buyCandidates = append(buyCandidates, RankedSignal{
 				Asset:  asset,
+				Signal: sig,
 				Gain7D: gain7d,
 			})
 			fmt.Printf("   📊 7-Day Strength: %+.2f%%\n", gain7d)
 		} else if sig.Action == ACTION_SELL {
 			sellCandidates = append(sellCandidates, RankedSignal{
 				Asset:  asset,
+				Signal: sig,
 				Gain7D: gain7d,
 			})
 			fmt.Printf("   📉 7-Day Weakness: %+.2f%%\n", gain7d)
@@ -529,6 +547,19 @@ func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive 
 					fmt.Printf("   [%s] Conv%d/%.0f%% — below threshold (need Conv%d/70%%). Logged only.\n",
 						asset.Symbol, sig.Conviction, sig.Confidence*100, minConviction)
 					continue
+				}
+
+				// Double-entry guard: skip if a matching open limit order already exists.
+				if existingSide, hasOrder := openOrderMap[asset.Symbol]; hasOrder {
+					wantSide := "Buy"
+					if sig.Action == ACTION_SELL {
+						wantSide = "Sell"
+					}
+					if existingSide == wantSide {
+						fmt.Printf("   ⏸️ [%s] Skipping — %s limit already queued from previous cycle.\n",
+							asset.Symbol, existingSide)
+						continue
+					}
 				}
 
 				fmt.Printf("[%s] Conv%d/%.0f%% (%s) — executing.\n",
