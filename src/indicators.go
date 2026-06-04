@@ -17,6 +17,27 @@ func CalculateSMA(candles []Candle, period int) float64 {
 	return sum / float64(period)
 }
 
+// CalculateEMASeries returns EMA values for every candle in the slice.
+// Indices before period-1 are zero (insufficient data to seed).
+func CalculateEMASeries(candles []Candle, period int) []float64 {
+	result := make([]float64, len(candles))
+	if len(candles) < period {
+		return result
+	}
+	multiplier := 2.0 / (float64(period) + 1.0)
+	var sum float64
+	for i := 0; i < period; i++ {
+		sum += candles[i].Close
+	}
+	ema := sum / float64(period)
+	result[period-1] = ema
+	for i := period; i < len(candles); i++ {
+		ema = ((candles[i].Close - ema) * multiplier) + ema
+		result[i] = ema
+	}
+	return result
+}
+
 // CalculateEMA calculates the Exponential Moving Average of the last N closes
 func CalculateEMA(candles []Candle, period int) float64 {
 	if len(candles) < period {
