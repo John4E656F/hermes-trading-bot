@@ -1,6 +1,6 @@
 package main
 
-
+import "fmt"
 
 func DetectConsolidation(candles1d []Candle, minDays int, maxRangePct float64) ConsolidationState {
 	if len(candles1d) < minDays {
@@ -37,6 +37,49 @@ func DetectConsolidation(candles1d []Candle, minDays int, maxRangePct float64) C
 		RangePct:        rangePct,
 		DurationDays:    minDays,
 	}
+}
+
+// EvaluateS5BBSqueeze detects Bollinger Band compression and fires when price
+// breaks out of the squeeze with volume confirmation.
+//
+// The edge: low volatility (squeeze) always precedes high volatility (breakout).
+// When BBands compress below 4% width AND price breaks a band with volume,
+// the move tends to follow through because it represents stored energy releasing.
+func EvaluateS5BBSqueeze(bb BollingerBands, latestPrice, latestVol, avgVol float64) S5Signal {
+	sig := S5Signal{}
+
+	if bb.Basis == 0 || avgVol == 0 {
+		sig.Reason = "No BB/volume data for S5"
+		return sig
+	}
+
+	bbWidthPct := ((bb.Upper - bb.Lower) / bb.Basis) * 100.0
+	sig.BBWidthPct = bbWidthPct
+	volConfirmed := latestVol >= avgVol*1.5
+
+	if bbWidthPct >= 4.0 {
+		sig.Reason = fmt.Sprintf("BB width %.2f%% — no squeeze active (need <4%%)", bbWidthPct)
+		return sig
+	}
+
+	// Squeeze is active. Check for breakout.
+	if latestPrice > bb.Upper && volConfirmed {
+		sig.Active = true
+		sig.Action = ACTION_BUY
+		sig.Reason = fmt.Sprintf(
+			"BB SQUEEZE BREAKOUT UP: width %.2f%%, price above upper band, vol %.1fx surge.",
+			bbWidthPct, latestVol/avgVol)
+	} else if latestPrice < bb.Lower && volConfirmed {
+		sig.Active = true
+		sig.Action = ACTION_SELL
+		sig.Reason = fmt.Sprintf(
+			"BB SQUEEZE BREAKDOWN: width %.2f%%, price below lower band, vol %.1fx surge.",
+			bbWidthPct, latestVol/avgVol)
+	} else {
+		sig.Reason = fmt.Sprintf("BB SQUEEZE PRIMED: width %.2f%% — waiting for directional break.", bbWidthPct)
+	}
+
+	return sig
 }
 
 func EvaluateS3Breakout(price float64, consol ConsolidationState, latestVolume float64, avgVolume float64) S3Signal {
