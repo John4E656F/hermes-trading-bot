@@ -43,6 +43,12 @@ func main() {
 
 	client := NewBybitClient()
 
+	// ── Position Management: run before new signals ───────────────────
+	// Move profitable positions to break-even and close stale ranging trades.
+	if !scanMode {
+		ManageBreakevenStops(client)
+	}
+
 	// ── Phase 3: Live Capital Guard — fetch wallet balance from Bybit ──
 	liveBalance, err := fetchLiveBalance(client)
 	if err != nil {
@@ -101,7 +107,6 @@ func main() {
 
 	// Wire Execution Engine with the LIVE balance
 	executor := NewExecutionEngine(client, liveBalance)
-	aiClient := NewAIClient()
 
 	marketData := MarketData{
 		Assets:      make(map[string]*AssetSnapshot),
@@ -141,6 +146,9 @@ func main() {
 
 			ind4h := ComputeAllIndicators(candles4h)
 			ind4h.BBands = CalculateBollingerBands(candles4h, 20, 2.0)
+			if ind4h.BBands.Basis > 0 {
+				ind4h.BBWidth = ((ind4h.BBands.Upper - ind4h.BBands.Lower) / ind4h.BBands.Basis) * 100.0
+			}
 
 			ind1d := ComputeAllIndicators(candles1d)
 			ind1d.ADX14 = CalculateADX(candles1d, 14)
@@ -175,7 +183,12 @@ func main() {
 	wg.Wait() // Block until all concurrent workers finish
 	fmt.Println("✅ Ingestion complete.")
 
-	printAndExecuteSignals(marketData, aiClient, executor, forceSignalToggle, watchlist, freezeEntries, scanMode)
+	printAndExecuteSignals(marketData, executor, forceSignalToggle, watchlist, freezeEntries, scanMode)
+
+	// ── Position Management: enforce max hold / trend flip ────────────
+	if !scanMode {
+		EnforceMaxHoldPeriod(client, marketData)
+	}
 
 	// ── 4-Hour Macro Snapshot Broadcast ──
 	if is4HourBoundary() {
@@ -248,7 +261,7 @@ func parseFloat(s string) (float64, error) {
 	return v, nil
 }
 
-func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine, forceActive bool, watchlist []string, freezeEntries bool, scanMode bool) {
+func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive bool, watchlist []string, freezeEntries bool, scanMode bool) {
 	fmt.Println("\n=========================================================================================")
 	fmt.Println("                          HERMES LIVE EXECUTION DASHBOARD                            ")
 	fmt.Println("=========================================================================================")
@@ -315,7 +328,11 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 		allCandidates := append(buyCandidates, sellCandidates...)
+<<<<<<< HEAD
 		fmt.Printf("%-10s %-12s %-10s  %-22s\n", "SYMBOL", "ADX(1D)", "VOLUME SURGE", "7D GAIN")
+=======
+		fmt.Printf("%-10s %-12s %-22s  %-10s\n", "SYMBOL", "ADX(1D)", "VOLUME SURGE", "7D GAIN")
+>>>>>>> zen-keller-l8bGb
 		for _, c := range allCandidates {
 			asset := c.Asset
 			avgVol := CalculateVolumeMA(asset.Snap4h.Candles, 20)
@@ -484,6 +501,7 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 			filtered = filtered[:3]
 		}
 
+<<<<<<< HEAD
 		// ── Tiered Capital Protection ─────────────────────────────────
 		// Replaces hardcoded $103 peak. Scales minimum conviction requirement
 		// with wallet size so the bot can still trade its way back on high-quality
@@ -548,6 +566,41 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 			}
 		}
 	}
+=======
+		// ── Drawdown Circuit Breaker ──
+		peakCapital := 103.0 // highest wallet seen
+		if data.LiveBalance < peakCapital*0.85 {
+			fmt.Printf("🚨 DRAWDOWN LIMIT REACHED: $%.2f < 85%% of peak $%.2f. Blocking ALL entries.\n", data.LiveBalance, peakCapital)
+		} else {
+			// Normal trading flow inside this else block
+
+		for _, c := range filtered {
+			asset := c.Asset
+			sig := c.Signal
+
+			// Execution threshold: Conviction >= 2 AND Confidence >= 0.70.
+			// Conviction 1 signals are logged only — never executed.
+			if sig.Conviction < 2 || sig.Confidence < 0.70 {
+				fmt.Printf("   📋 [%s] Conv%d/%.0f%% — below execution threshold. Logged only.\n",
+					asset.Symbol, sig.Conviction, sig.Confidence*100)
+				continue
+			}
+
+			fmt.Printf("💡 [%s] Conv%d/%.0f%% (%s) — executing.\n",
+				asset.Symbol, sig.Conviction, sig.Confidence*100, sig.Strategy)
+			err := exec.ExecuteBracketTrade(
+				asset.Symbol, sig.Action, asset.CurrentPrice,
+				asset.Snap4h.Indicators.ATR14, sig.Confidence,
+				asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles,
+			)
+			if err != nil {
+				fmt.Printf("   ❌ Execution failed: %v\n\n", err)
+			}
+		}
+	}
+	// End drawdown circuit-breaker
+	}
+>>>>>>> zen-keller-l8bGb
 	fmt.Println("=========================================================================================")
 }
 

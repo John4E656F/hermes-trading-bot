@@ -18,13 +18,16 @@ type BollingerBands struct {
 }
 
 type Indicators struct {
-	EMA20    float64
-	SMA50    float64
-	SMA200   float64
-	RSI14    float64
-	ATR14    float64
-	ADX14    float64
-	BBands   BollingerBands
+	EMA20     float64
+	SMA50     float64
+	SMA200    float64
+	RSI14     float64
+	ATR14     float64
+	ADX14     float64
+	WilliamsR float64 // -100 (oversold) to 0 (overbought); faster than RSI
+	VWAP20    float64 // 20-period volume-weighted average price
+	BBands    BollingerBands
+	BBWidth   float64 // (Upper-Lower)/Basis × 100 — squeeze when < 4%
 }
 
 type TimeframeSnapshot struct {
@@ -59,9 +62,9 @@ type FundingDataPoint struct {
 }
 type FundingSnapshot struct {
 	CurrentRate float64
-	IsNegative  bool // rate < -0.01%
-	IsPositive  bool // rate > 0.03%
-	IsExtreme   bool // either extreme
+	IsNegative  bool // rate < -0.02% (extreme — shorts paying a lot)
+	IsPositive  bool // rate > 0.05% (extreme — longs paying a lot)
+	IsExtreme   bool
 }
 
 // ── Consolidation ──
@@ -82,11 +85,19 @@ const (
 )
 
 // ── Per-Strategy Sub-Signals ──
+type S0Signal struct { Active bool; Action SignalAction; Reason string }
 type S1Signal struct { Active bool; Action SignalAction; Reason string; Proximity float64 }
 type S2Signal struct { Active bool; Action SignalAction; Reason string; SqueezeType string }
 type S3Signal struct { Active bool; Action SignalAction; Reason string; Primed bool }
+<<<<<<< HEAD
 type S0Signal struct { Active bool; Action SignalAction; Reason string }
 type S4Signal struct { Active bool; Action SignalAction; Reason string; CrossType string }
+=======
+// S4: Funding Rate Contrarian — LEADING signal. Extreme funding predicts reversals.
+type S4Signal struct { Active bool; Action SignalAction; Reason string; FundingRate float64 }
+// S5: Bollinger Band Squeeze Breakout — energy-release signal after compression.
+type S5Signal struct { Active bool; Action SignalAction; Reason string; BBWidthPct float64 }
+>>>>>>> zen-keller-l8bGb
 
 type AssetSnapshot struct {
 	Symbol        string

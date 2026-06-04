@@ -118,6 +118,52 @@ func CalculateATR(candles []Candle, period int) float64 {
 	return avgATR
 }
 
+// CalculateWilliamsR computes Williams %R over the last N candles.
+// Range: -100 (most oversold) to 0 (most overbought).
+// -80 or lower = oversold (BUY zone); -20 or higher = overbought (SELL zone).
+// Faster and more responsive than RSI for entry timing.
+func CalculateWilliamsR(candles []Candle, period int) float64 {
+	if len(candles) < period {
+		return -50.0
+	}
+	start := len(candles) - period
+	highest := candles[start].High
+	lowest := candles[start].Low
+	for _, c := range candles[start:] {
+		if c.High > highest {
+			highest = c.High
+		}
+		if c.Low < lowest {
+			lowest = c.Low
+		}
+	}
+	if highest == lowest {
+		return -50.0
+	}
+	current := candles[len(candles)-1].Close
+	return ((highest - current) / (highest - lowest)) * -100.0
+}
+
+// CalculateVWAP computes the volume-weighted average price over the last N candles.
+// Uses typical price (H+L+C)/3 weighted by volume. More accurate than simple EMA
+// because it accounts for where volume actually traded.
+func CalculateVWAP(candles []Candle, period int) float64 {
+	if len(candles) < period {
+		return 0.0
+	}
+	start := len(candles) - period
+	var totalPV, totalVol float64
+	for _, c := range candles[start:] {
+		typical := (c.High + c.Low + c.Close) / 3.0
+		totalPV += typical * c.Volume
+		totalVol += c.Volume
+	}
+	if totalVol == 0 {
+		return 0.0
+	}
+	return totalPV / totalVol
+}
+
 // ComputeAllIndicators populates standard baseline metrics
 func ComputeAllIndicators(candles []Candle) Indicators {
 	var ind Indicators
@@ -129,6 +175,8 @@ func ComputeAllIndicators(candles []Candle) Indicators {
 	ind.SMA200 = CalculateSMA(candles, 200)
 	ind.RSI14 = CalculateRSI(candles, 14)
 	ind.ATR14 = CalculateATR(candles, 14)
+	ind.WilliamsR = CalculateWilliamsR(candles, 14)
+	ind.VWAP20 = CalculateVWAP(candles, 20)
 	return ind
 }
 
