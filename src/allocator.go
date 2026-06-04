@@ -16,6 +16,10 @@ type StrategySignal struct {
 	S3         S3Signal
 }
 
+// EvaluateMarketSnapshot makes the FINAL decision on every trade.
+// This is the core strategy. It must be PROFITABLE or return HOLD.
+// The market is currently bearish (~60%+ SELL signals).
+// This strategy is STRICT: it defaults to HOLD and only triggers on clear setups.
 func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	dailyADX := asset.Snap1d.Indicators.ADX14
 	currentRegime := ClassifyRegime(dailyADX)
@@ -25,120 +29,134 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	ema20 := snap4h.Indicators.EMA20
 	rsi14 := snap4h.Indicators.RSI14
 	sma50 := snap4h.Indicators.SMA50
-	sma200 := snap4h.Indicators.SMA200
 
 	avgVol := CalculateVolumeMA(snap4h.Candles, 20)
 	latestVol := snap4h.Candles[len(snap4h.Candles)-1].Volume
 	volRatio := latestVol / avgVol
+	gain7d := Compute7DayGain(asset.Snap1d.Candles)
 
-	// ── Master Gate: Candle Trend ────────────────────────────────────
-	// The Master Gate is the first pass filter. It checks proven candle-based
-	// indicators (price vs EMA20, RSI, SMA50/200, ADX, volume surge).
-	//
-	// Strong trends (ADX > 40) bypass volume confirmation entirely.
-	// Ranging/crashing assets get flagged separately.
+	// ── Master Gate ────────────────────────────────────────────────
+	// Default: HOLD. Only trigger on genuinely strong setups.
 	masterAction := ACTION_HOLD
-	masterReason := "No clear candle trend alignment"
+	masterReason := "No high-confidence setup detected"
 	masterStrategy := "HOLD"
 	volSurge := volRatio >= 1.5
 	strongTrend := dailyADX > 40
-	volOk := volSurge || strongTrend
 
-	// ── BUY Conditions (Master Gate) ──
-	buyCandle := latestPrice > ema20 && rsi14 > 40 && sma50 > sma200
-	buyVolume := volOk && latestPrice > ema20 && rsi14 > 45
-	buyOversold := latestPrice < ema20 && rsi14 < 35 && currentRegime == REGIME_RANGING && volSurge
-	buyStrongTrend := dailyADX > 40 && latestPrice > ema20 && rsi14 > 45
+	// ── HIGH-CONFIDENCE SELL (bearish market bias) ────────────────
+	// Requires ALL of: price below EMA20+SMA50, RSI bearish, ADX trending, volume
+	sellStrict := latestPrice < ema20 &&
+		latestPrice < sma50 &&
+		rsi14 < 50 &&
+		dailyADX > 25 &&
+		volSurge
 
-	// ── SELL Conditions (Master Gate) ──
-	sellCandle := latestPrice < ema20 && rsi14 < 60
-	sellVolume := volOk && latestPrice < ema20
-	sellOverbought := latestPrice > ema20 && rsi14 > 65 && currentRegime == REGIME_RANGING && volSurge
-	sellStrongTrend := dailyADX > 40 && latestPrice < ema20 && rsi14 < 45
+	// Strong trend sell (ADX > 40, no volume needed)
+	sellTrend := dailyADX > 40 &&
+		latestPrice < ema20 &&
+		rsi14 < 45
 
-	if buyStrongTrend || buyCandle || buyVolume || buyOversold {
-		masterAction = ACTION_BUY
-		switch {
-		case buyStrongTrend:
-			masterReason = fmt.Sprintf("Master Gate: Strong uptrend (ADX %.0f>40) with price above EMA20.", dailyADX)
-		case buyVolume:
-			masterReason = fmt.Sprintf("Master Gate: Bullish candle + volume surge (ratio=%.2fx).", volRatio)
-		case buyOversold:
-			masterReason = "Master Gate: Oversold bounce in ranging regime with volume confirmation."
-		default:
-			masterReason = fmt.Sprintf("Master Gate: Bullish candle trend (price=%.2f > EMA20=%.2f).", latestPrice, ema20)
-		}
-		masterStrategy = "Candle Trend"
-	} else if sellStrongTrend || sellCandle || sellVolume || sellOverbought {
+	// Oversold mean reversion SHORT (rare - shorting into weakness)
+	sellOverbought := latestPrice > ema20 &&
+		rsi14 > 70 &&
+		dailyADX > 25 &&
+		volRatio >= 2.0 &&
+		currentRegime == REGIME_RANGING
+
+	// ── HIGH-CONFIDENCE BUY (only when very strong) ────────────────
+	// In this bearish market, BUY requires exceptional confirmation
+	buyStrict := latestPrice > ema20 &&
+		latestPrice > sma50 &&
+		rsi14 > 50 &&
+		dailyADX > 25 &&
+		volSurge
+
+	// Only allow weak-trend buy on massive volume
+	buyVolume := dailyADX < 25 &&
+		latestPrice > ema20 &&
+		latestPrice > sma50 &&
+		rsi14 > 50 &&
+		volRatio >= 3.0
+
+	// Oversold bounce (only when truly oversold with volume)
+	buyOversold := latestPrice < ema20 &&
+		rsi14 < 30 &&
+		currentRegime == REGIME_RANGING &&
+		volRatio >= 2.0
+
+	// Strong trend buy (ADX > 40 confirmed uptrend)
+	buyStrongTrend := dailyADX > 40 &&
+		latestPrice > ema20 &&
+		rsi14 > 50
+
+	// ── Gate application ──
+	if sellStrict {
 		masterAction = ACTION_SELL
-		switch {
-		case sellStrongTrend:
-			masterReason = fmt.Sprintf("Master Gate: Strong downtrend (ADX %.0f>40) with price below EMA20.", dailyADX)
-		case sellVolume:
-			masterReason = fmt.Sprintf("Master Gate: Bearish candle + volume surge (ratio=%.2fx).", volRatio)
-		case sellOverbought:
-			masterReason = "Master Gate: Overbought rejection in ranging regime with volume confirmation."
-		default:
-			masterReason = fmt.Sprintf("Master Gate: Bearish candle trend (price=%.2f < EMA20=%.2f).", latestPrice, ema20)
-		}
-		masterStrategy = "Candle Trend"
+		masterReason = fmt.Sprintf("Strict SELL: price below EMA20+SMA50, RSI %.0f<50, ADX %.0f>25, vol %.2fx.", rsi14, dailyADX, volRatio)
+		masterStrategy = "Strict Sell"
+	} else if sellTrend {
+		masterAction = ACTION_SELL
+		masterReason = fmt.Sprintf("Trend SELL: ADX %.0f>40 strong downtrend, price below EMA20, RSI %.0f<45.", dailyADX, rsi14)
+		masterStrategy = "Trend Sell"
+	} else if sellOverbought {
+		masterAction = ACTION_SELL
+		masterReason = fmt.Sprintf("Overbought SELL: RSI %.0f>70, ADX %.0f>25, volume %.2fx. Rejection setup.", rsi14, dailyADX, volRatio)
+		masterStrategy = "Overbought Sell"
+	} else if buyStrongTrend {
+		masterAction = ACTION_BUY
+		masterReason = fmt.Sprintf("Strong trend BUY: ADX %.0f>40 uptrend, RSI %.0f>50, above EMA20.", dailyADX, rsi14)
+		masterStrategy = "Trend Buy"
+	} else if buyVolume {
+		masterAction = ACTION_BUY
+		masterReason = fmt.Sprintf("Volume BUY: price above EMA20+SMA50, vol %.2fx>3x, RSI %.0f>50.", volRatio, rsi14)
+		masterStrategy = "Volume Buy"
+	} else if buyOversold {
+		masterAction = ACTION_BUY
+		masterReason = fmt.Sprintf("Oversold BUY: RSI %.0f<30, volume %.2fx>2x. Reversal zone.", rsi14, volRatio)
+		masterStrategy = "Oversold Buy"
+	} else if buyStrict {
+		masterAction = ACTION_BUY
+		masterReason = fmt.Sprintf("Strict BUY: above EMA20+SMA50, RSI %.0f>50, ADX %.0f>25, vol %.2fx.", rsi14, dailyADX, volRatio)
+		masterStrategy = "Strict Buy"
 	}
 
-	// ── Exhaustion Filter: skip overextended assets ────────────────
-	// Prevents buying assets that have already pumped (UBUSDT +130%) or
-	// selling assets in capitulation dumps where trend is exhausted.
-	gain7d := Compute7DayGain(asset.Snap1d.Candles)
+	// ── Exhaustion Filter ─────────────────────────────────────────
 	if masterAction == ACTION_BUY && gain7d > 40.0 && dailyADX < 50 {
 		masterAction = ACTION_HOLD
-		masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D gain exceeds 40%% limit (ADX %.0f < 50). Pump exhaustion risk.", gain7d, dailyADX)
+		masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D gain >40%% (ADX %.0f<50). Pump risk.", gain7d, dailyADX)
 		masterStrategy = "HOLD"
 	} else if masterAction == ACTION_SELL && gain7d < -40.0 && dailyADX < 50 {
 		masterAction = ACTION_HOLD
-		masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D loss exceeds -40%% limit (ADX %.0f < 50). Capitulation risk.", gain7d, dailyADX)
+		masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D loss <-40%% (ADX %.0f<50). Capitulation risk.", gain7d, dailyADX)
 		masterStrategy = "HOLD"
 	}
 
-	// ── Default return if Master Gate is HOLD ──
+	// ── HOLD return ──────────────────────────────────────────────
 	if masterAction == ACTION_HOLD {
-		holdReason := "Master Gate: "
-		if rsi14 >= 40 && rsi14 <= 60 && latestPrice > ema20 {
-			holdReason += "Neutral within trend zone."
-		} else if latestPrice < ema20 && rsi14 > 35 {
-			holdReason += "Below EMA20 but RSI recovering."
-		} else if latestPrice > ema20 && rsi14 < 45 {
-			holdReason += "Above EMA20 but RSI weak."
-		} else {
-			holdReason += "No clear directional bias."
-		}
 		return StrategySignal{
 			Symbol:     asset.Symbol,
 			Regime:     currentRegime,
 			Action:     ACTION_HOLD,
 			Strategy:   "HOLD",
-			Reason:     holdReason,
+			Reason:     "Master Gate: " + masterReason,
 			Conviction: 0,
 			Confidence: 0.0,
 		}
 	}
 
-	// ── S0: Candle Momentum ──────────────────────────────────────────
-	// S0 is the first advanced strategy. It always agrees with the Master
-	// Gate when the Master Gate has a direction, ensuring that every
-	// candle-based signal reaches at least Conviction 2 (bypassing AI).
-	// This means proven candle patterns (RSI, EMA, volume, ADX) execute
-	// immediately without paying the OpenRouter API tax.
+	// ── S0: Only agrees when setup is verified (NO auto-agree) ─────
+	// S0 independently verifies the setup using proven candle patterns
 	s0 := S0Signal{Active: false}
-	if masterAction != ACTION_HOLD {
-		s0 = S0Signal{
-			Active: true,
-			Action: masterAction,
-			Reason: "Candle momentum confirms direction via RSI/EMA/volume confluence.",
-		}
+	if masterAction == ACTION_BUY && rsi14 > 50 && latestPrice > ema20 && latestPrice > sma50 {
+		s0 = S0Signal{Active: true, Action: ACTION_BUY, Reason: "Candle momentum: RSI>50, above EMA20+SMA50."}
+	} else if masterAction == ACTION_SELL && rsi14 < 50 && latestPrice < ema20 && latestPrice < sma50 {
+		s0 = S0Signal{Active: true, Action: ACTION_SELL, Reason: "Candle momentum: RSI<50, below EMA20+SMA50."}
+	} else if strongTrend {
+		// Strong trend bypasses the RSI/MA check
+		s0 = S0Signal{Active: true, Action: masterAction, Reason: fmt.Sprintf("Strong trend (ADX %.0f>40).", dailyADX)}
 	}
 
-	// ── Advanced Strategies (S1 / S2 / S3) ─────────────────────────
-	// Only evaluated when Master Gate has a direction. These increase
-	// conviction scoring — they never override the Master Gate.
+	// ── Advanced Strategies ───────────────────────────────────────
 	s1 := EvaluateS1MeanReversion(latestPrice, asset.VP)
 	s2 := EvaluateS2Squeeze(asset.OI, asset.Funding, latestPrice, ema20)
 	s3 := EvaluateS3Breakout(latestPrice, asset.Consolidation, latestVol, avgVol)
@@ -153,14 +171,13 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		S3:     s3,
 	}
 
-	// ── Conviction Scoring ─────────────────────────────────────────
-	// Base = 0. +1 for S0 (always agrees with Master Gate).
+	// ── Honest Conviction Scoring ─────────────────────────────────
+	// Base = 1 for Master Gate. +1 only for S0 if verified independently.
 	// +1 for each advanced strategy (S1/S2/S3) that agrees.
 	agreeCount := 0
 	advancedReasons := ""
 
-	// S0 always agrees with the Master Gate direction when active.
-	if masterAction != ACTION_HOLD {
+	if s0.Active {
 		agreeCount = 1
 	}
 
@@ -182,7 +199,6 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 			advAction = s3.Action
 			reason = s3.Reason
 		}
-
 		if active && advAction == masterAction {
 			agreeCount++
 			if advancedReasons != "" {
@@ -193,33 +209,87 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	}
 
 	switch {
-	case agreeCount == 0:
-		signal.Conviction = 1
-		signal.Confidence = 0.55
-		signal.Strategy = masterStrategy
-		signal.Reason = masterReason
+	case agreeCount <= 0:
+		// Master Gate alone with no S0/S1/S2/S3 verification = skip
+		return StrategySignal{
+			Symbol:     asset.Symbol,
+			Regime:     currentRegime,
+			Action:     ACTION_HOLD,
+			Strategy:   "HOLD",
+			Reason:     "Master Gate triggered but no strategy verified it. Skipping.",
+			Conviction: 0,
+			Confidence: 0.0,
+		}
 	case agreeCount == 1:
+		// Only S0 verified. Boost to Conv 2+ if conditions are exceptional.
+		boost := false
+		boostReason := ""
+
+		// Strong trend boost: ADX > 40 + RSI aligned with direction
+		if dailyADX > 40 {
+			if masterAction == ACTION_BUY && rsi14 > 55 {
+				boost = true
+				boostReason = fmt.Sprintf("Strong trend (ADX %.0f>40) + RSI %.0f>55", dailyADX, rsi14)
+			} else if masterAction == ACTION_SELL && rsi14 < 45 {
+				boost = true
+				boostReason = fmt.Sprintf("Strong trend (ADX %.0f>40) + RSI %.0f<45", dailyADX, rsi14)
+			}
+		}
+
+		// Volume surge boost: 2x+ volume + RSI strongly aligned
+		if !boost && volRatio >= 2.0 {
+			if masterAction == ACTION_BUY && rsi14 > 55 {
+				boost = true
+				boostReason = fmt.Sprintf("Volume surge %.1fx + RSI %.0f>55", volRatio, rsi14)
+			} else if masterAction == ACTION_SELL && rsi14 < 45 {
+				boost = true
+				boostReason = fmt.Sprintf("Volume surge %.1fx + RSI %.0f<45", volRatio, rsi14)
+			}
+		}
+
+		// Oversold bounce / Overbought rejection boost
+		if !boost {
+			if masterAction == ACTION_BUY && rsi14 < 35 && volRatio >= 1.5 {
+				boost = true
+				boostReason = fmt.Sprintf("Oversold bounce RSI %.0f<35 + vol %.1fx", rsi14, volRatio)
+			} else if masterAction == ACTION_SELL && rsi14 > 65 && volRatio >= 1.5 {
+				boost = true
+				boostReason = fmt.Sprintf("Overbought rejection RSI %.0f>65 + vol %.1fx", rsi14, volRatio)
+			}
+		}
+
+		if boost {
+			signal.Conviction = 2
+			signal.Confidence = 0.70
+			signal.Strategy = "QUALITY: " + masterStrategy
+			signal.Reason = fmt.Sprintf("%s | %s", masterReason, boostReason)
+		} else {
+			// Standard Conviction 1 — stays below execution threshold
+			signal.Conviction = 1
+			signal.Confidence = 0.65
+			signal.Strategy = masterStrategy
+			signal.Reason = masterReason + " | Verified by S0 (low conviction)"
+		}
+	case agreeCount == 2:
 		signal.Conviction = 2
 		signal.Confidence = 0.75
-		signal.Strategy = "Candle + " + masterStrategy
+		signal.Strategy = "S0 + " + masterStrategy
 		signal.Reason = fmt.Sprintf("%s | %s", masterReason, advancedReasons)
-	case agreeCount >= 2:
+	case agreeCount >= 3:
 		signal.Conviction = 3
-		signal.Confidence = 0.90
+		signal.Confidence = 0.85
 		signal.Strategy = "META: " + masterStrategy
-		signal.Reason = fmt.Sprintf("Master Gate + %d advanced strategies aligned | %s",
-			agreeCount, advancedReasons)
+		signal.Reason = fmt.Sprintf("META (%d strategies aligned) | %s | %s",
+			agreeCount, masterReason, advancedReasons)
 	}
 
-	// ── Moderate Extension Risk Cap ──────────────────────────────
-	// Assets with 25-40% 7D gain/loss are extended but not exhausted.
-	// Cap confidence to reduce position sizing on these borderline setups.
+	// ── Risk Cap ─────────────────────────────────────────────────
 	if gain7d > 25.0 && gain7d <= 40.0 && signal.Confidence > 0.70 {
 		signal.Confidence = 0.70
-		signal.Reason += " | ⚠️ 7D gain " + fmt.Sprintf("%.0f%%", gain7d) + " — risk-capped"
+		signal.Reason += " | ⚠️ risk-capped (7D +" + fmt.Sprintf("%.0f%%", gain7d) + ")"
 	} else if gain7d < -25.0 && gain7d >= -40.0 && signal.Confidence > 0.70 {
 		signal.Confidence = 0.70
-		signal.Reason += " | ⚠️ 7D loss " + fmt.Sprintf("%.0f%%", gain7d) + " — risk-capped"
+		signal.Reason += " | ⚠️ risk-capped (7D " + fmt.Sprintf("%.0f%%", gain7d) + ")"
 	}
 
 	return signal

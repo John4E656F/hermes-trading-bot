@@ -379,29 +379,30 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 			}
 		}
 
-		// ── Market Bias Filter: skip LONGs when market is bearish ──
+		// ── Market Bias Filter: prioritize the dominant direction ──
 		totalBuys := len(tradableBuys)
 		totalSells := len(tradableSells)
 		bearishBias := totalSells > totalBuys*2
 		bullishBias := totalBuys > totalSells*2
 		if bearishBias {
-			fmt.Printf("   🐻 BEARISH BIAS: %d sells vs %d buys (%.1fx). Reducing LONG confidence.\n",
-				totalSells, totalBuys, float64(totalSells)/float64(max(totalBuys, 1)))
+			fmt.Printf("   🐻 BEARISH BIAS: %d sells vs %d buys. Reducing LONG ranks.\n",
+				totalSells, totalBuys)
+			// Keep all positions, just cap LONG confidence
 			for i := range tradableBuys {
+				tradableBuys[i].Signal.Confidence *= 0.6
 				if tradableBuys[i].Signal.Conviction > 1 {
 					tradableBuys[i].Signal.Conviction--
 				}
-				tradableBuys[i].Signal.Confidence *= 0.5
 			}
 		}
 		if bullishBias {
-			fmt.Printf("   🐂 BULLISH BIAS: %d buys vs %d sells (%.1fx). Reducing SHORT confidence.\n",
-				totalBuys, totalSells, float64(totalBuys)/float64(max(totalSells, 1)))
+			fmt.Printf("   🐂 BULLISH BIAS: %d buys vs %d sells. Reducing SHORT ranks.\n",
+				totalBuys, totalSells)
 			for i := range tradableSells {
+				tradableSells[i].Signal.Confidence *= 0.6
 				if tradableSells[i].Signal.Conviction > 1 {
 					tradableSells[i].Signal.Conviction--
 				}
-				tradableSells[i].Signal.Confidence *= 0.5
 			}
 		}
 
@@ -437,11 +438,18 @@ func printAndExecuteSignals(data MarketData, ai *AIClient, exec *ExecutionEngine
 			filtered = filtered[:3]
 		}
 
+		// ── Drawdown Circuit Breaker ──
+		peakCapital := 103.0 // highest wallet seen
+		if data.LiveBalance < peakCapital*0.85 {
+			fmt.Printf("🚨 DRAWDOWN LIMIT REACHED: $%.2f < 85%% of peak $%.2f. Blocking ALL entries.\n", data.LiveBalance, peakCapital)
+		} else {
+			// Normal trading flow inside this else block
+
 		for _, c := range filtered {
 			asset := c.Asset
-			sig := EvaluateMarketSnapshot(asset)
+			sig := c.Signal // USE THE STORED SIGNAL (bias-filtered already)
 
-			if sig.Conviction >= 2 {
+			if sig.Conviction >= 2 && sig.Confidence >= 0.70 {
 				fmt.Printf("💡 [%s] Local confidence=%.0f%% (Conviction %d) — bypassing AI, executing directly.\n", asset.Symbol, sig.Confidence*100, sig.Conviction)
 err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice, asset.Snap4h.Indicators.ATR14, sig.Confidence, asset.Snap1d.Indicators.ADX14, asset.Snap4h.Candles)
 			if err != nil {
@@ -468,6 +476,8 @@ err := exec.ExecuteBracketTrade(asset.Symbol, sig.Action, asset.CurrentPrice, as
 				fmt.Println("   🛡️ Signal REJECTED by AI risk layer. Order routing halted.")
 			}
 		}
+	}
+	// Close drawdown circuit-breaker else block
 	}
 	fmt.Println("=========================================================================================")
 }
