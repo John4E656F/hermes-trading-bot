@@ -192,12 +192,13 @@ func main() {
 	fmt.Println("✅ Ingestion complete.")
 
 	// ── S6: Kronos AI batch prediction ────────────────────────────────
-	// Called after ingestion so all candle data is ready.
-	// Populates KronosPred/KronosConf on each AssetSnapshot in-place.
-	// No-ops silently if the Python service is not running.
 	FetchKronosPredictions(marketData.Assets)
 
-	printAndExecuteSignals(marketData, executor, forceSignalToggle, watchlist, freezeEntries, scanMode)
+	// ── Market Conditions Analysis ────────────────────────────────────
+	marketAnalysis := AnalyzeMarket(marketData, watchlist)
+	PrintMarketAnalysis(marketAnalysis, len(watchlist))
+
+	printAndExecuteSignals(marketData, marketAnalysis, executor, forceSignalToggle, watchlist, freezeEntries, scanMode)
 
 	// ── Position Management: enforce max hold / trend flip ────────────
 	if !scanMode {
@@ -213,6 +214,7 @@ func main() {
 	if !scanMode {
 		PrintActivePositionsQueries(client)
 		PrintRecentClosedPnLSummary(client)
+		UpdateTradeOutcomes(client)
 	}
 }
 
@@ -275,7 +277,7 @@ func parseFloat(s string) (float64, error) {
 	return v, nil
 }
 
-func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive bool, watchlist []string, freezeEntries bool, scanMode bool) {
+func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionEngine, forceActive bool, watchlist []string, freezeEntries bool, scanMode bool) {
 	fmt.Println("\n=========================================================================================")
 	fmt.Println("                          HERMES LIVE EXECUTION DASHBOARD                            ")
 	fmt.Println("=========================================================================================")
@@ -527,6 +529,54 @@ func printAndExecuteSignals(data MarketData, exec *ExecutionEngine, forceActive 
 		})
 		if len(filtered) > 3 {
 			filtered = filtered[:3]
+		}
+
+		// ── Strategy Deduplication ────────────────────────────────────
+		// Only take the strongest signal per strategy type per cycle.
+		// Prevents correlated entries (e.g. two S4 BUY signals simultaneously).
+		// The list is already sorted by conviction→|gain|, so first seen = best.
+		seenStrategy := make(map[string]bool)
+		var deduped []RankedSignal
+		for _, c := range filtered {
+			// Normalise strategy key: strip prefix qualifiers like "META: " / "CONFIRMED: "
+			stratKey := c.Signal.Strategy
+			for _, prefix := range []string{"META: ", "CONFIRMED: ", "QUALITY: "} {
+				if len(stratKey) > len(prefix) && stratKey[:len(prefix)] == prefix {
+					stratKey = stratKey[len(prefix):]
+					break
+				}
+			}
+			// Include direction so BUY S4 and SELL S4 are treated independently
+			key := stratKey + "_" + string(c.Signal.Action)
+			if seenStrategy[key] {
+				fmt.Printf("   🔁 DEDUP: [%s] %s skipped — stronger %s signal already queued this cycle.\n",
+					c.Asset.Symbol, c.Signal.Strategy, stratKey)
+				continue
+			}
+			seenStrategy[key] = true
+			deduped = append(deduped, c)
+		}
+		filtered = deduped
+
+		// ── Market Analysis Signal Adjustments ────────────────────────
+		// Apply funding settlement boost / crowded penalty to S4 signals.
+		for i := range filtered {
+			sig := &filtered[i].Signal
+			basedOnS4 := filtered[i].Signal.S4.Active && filtered[i].Signal.S4.Action == filtered[i].Signal.Action
+			if !basedOnS4 {
+				continue
+			}
+			if ma.FundingCrowded {
+				// Market-wide funding extreme — reduce confidence (worse timing)
+				sig.Confidence *= 0.75
+				sig.Reason += fmt.Sprintf(" | ⚠️ CROWDED: %d+ assets with same funding bias — macro event, not squeeze", len(watchlist)*2/5)
+			} else if ma.NearSettlement {
+				// Near settlement window — peak squeeze pressure, boost confidence
+				if sig.Confidence < 0.90 {
+					sig.Confidence = math.Min(sig.Confidence+0.05, 0.90)
+				}
+				sig.Reason += fmt.Sprintf(" | ⚡ SETTLEMENT BOOST: %d min to settlement — peak squeeze pressure", ma.MinutesToSettlement)
+			}
 		}
 
 
