@@ -55,19 +55,6 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	}
 	gain7d := Compute7DayGain(asset.Snap1d.Candles)
 
-	// ── Daily Trend Bias ──────────────────────────────────────────────
-	// Use daily EMA20 vs SMA50 to determine macro trend direction.
-	// dailyBearish = true means the primary trend is DOWN — suppress longs.
-	// dailyBullish = true means the primary trend is UP  — suppress shorts.
-	dailyEMA20 := asset.Snap1d.Indicators.EMA20
-	dailySMA50 := asset.Snap1d.Indicators.SMA50
-	dailyClose := latestPrice // 4H close ≈ current price; daily close used below
-	if len(asset.Snap1d.Candles) > 0 {
-		dailyClose = asset.Snap1d.Candles[len(asset.Snap1d.Candles)-1].Close
-	}
-	dailyBearish := dailyEMA20 > 0 && dailySMA50 > 0 && dailyEMA20 < dailySMA50 && dailyClose < dailySMA50
-	dailyBullish := dailyEMA20 > 0 && dailySMA50 > 0 && dailyEMA20 > dailySMA50 && dailyClose > dailySMA50
-
 	// ── Evaluate all sub-strategies ──────────────────────────────────
 	s4 := EvaluateS4FundingContrarian(asset.Funding, asset.OI)
 	s5 := EvaluateS5BBSqueeze(bb, latestPrice, latestVol, avgVol)
@@ -93,28 +80,20 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	// and just paying funding to hold a winning position — not a squeeze setup.
 	if s4.Active {
 		blocked := false
-		// Tightened from 5% → 2%: if price is below SMA50 at all in a bearish trend,
-		// shorts are likely correct and just paying funding to hold a winning position.
+		// S4 BUY is only valid when price is within 2% of SMA50.
+		// If price is already well below SMA50, shorts are positioned correctly —
+		// they are paying funding because their trade is winning, not because they
+		// are over-leveraged. Symmetric rule applies for S4 SELL.
 		if s4.Action == ACTION_BUY && sma50 > 0 && latestPrice < sma50*0.98 {
 			blocked = true
 			masterReason = fmt.Sprintf(
-				"S4 BUY blocked: price $%.4f is %.1f%% below SMA50 $%.4f — shorts may be correct, not over-leveraged. Need price recovery first.",
+				"S4 BUY blocked: price $%.4f is %.1f%% below SMA50 $%.4f — shorts paying funding on a winning position, not a squeeze.",
 				latestPrice, (1-latestPrice/sma50)*100, sma50)
-		} else if s4.Action == ACTION_BUY && dailyBearish {
-			blocked = true
-			masterReason = fmt.Sprintf(
-				"S4 BUY blocked: daily trend is BEARISH (EMA20 $%.4f < SMA50 $%.4f). Contrarian buy fights macro trend.",
-				dailyEMA20, dailySMA50)
 		} else if s4.Action == ACTION_SELL && sma50 > 0 && latestPrice > sma50*1.02 {
 			blocked = true
 			masterReason = fmt.Sprintf(
-				"S4 SELL blocked: price $%.4f is %.1f%% above SMA50 $%.4f — longs may be correct, not over-leveraged.",
+				"S4 SELL blocked: price $%.4f is %.1f%% above SMA50 $%.4f — longs paying funding on a winning position, not a squeeze.",
 				latestPrice, (latestPrice/sma50-1)*100, sma50)
-		} else if s4.Action == ACTION_SELL && dailyBullish {
-			blocked = true
-			masterReason = fmt.Sprintf(
-				"S4 SELL blocked: daily trend is BULLISH (EMA20 $%.4f > SMA50 $%.4f). Contrarian sell fights macro trend.",
-				dailyEMA20, dailySMA50)
 		}
 		if !blocked {
 			masterAction = s4.Action
@@ -132,18 +111,18 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	}
 
 	// ── TIER 3: Strong Trend Signals ─────────────────────────────────
+	// Symmetric: both sides require ADX>40 (confirmed trend) and W%R not yet
+	// at extreme exhaustion in the trend direction (room to continue).
+	// SELL: W%R > -70 means price is NOT yet deeply oversold — trend has room to fall.
+	// BUY:  W%R < -70 means price is in oversold dip within uptrend — room to rise.
 	if masterAction == ACTION_HOLD {
-		// Strong downtrend: ADX>40, price below EMA20, W%R not oversold yet
-		// Require daily confirmation: daily trend must also be bearish.
-		if dailyADX > 40 && latestPrice < ema20 && wrPct > -30 && !dailyBullish {
+		if dailyADX > 40 && latestPrice < ema20 && wrPct > -70 {
 			masterAction = ACTION_SELL
-			masterReason = fmt.Sprintf("Trend SELL: ADX %.0f>40, below EMA20, W%%R %.0f (not oversold).", dailyADX, wrPct)
+			masterReason = fmt.Sprintf("Trend SELL: ADX %.0f>40, below EMA20, W%%R %.0f (trend has room to fall).", dailyADX, wrPct)
 			masterStrategy = "Trend Sell"
-		} else if dailyADX > 40 && latestPrice > ema20 && wrPct < -70 && !dailyBearish {
-			// Strong uptrend: ADX>40, price above EMA20, W%R not yet overbought
-			// Block if daily trend is bearish — 4H bounce in a daily downtrend.
+		} else if dailyADX > 40 && latestPrice > ema20 && wrPct < -70 {
 			masterAction = ACTION_BUY
-			masterReason = fmt.Sprintf("Trend BUY: ADX %.0f>40, above EMA20, W%%R %.0f (not overbought).", dailyADX, wrPct)
+			masterReason = fmt.Sprintf("Trend BUY: ADX %.0f>40, above EMA20, W%%R %.0f (trend has room to rise).", dailyADX, wrPct)
 			masterStrategy = "Trend Buy"
 		}
 	}
@@ -159,11 +138,11 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 			masterStrategy = "Strict Sell"
 		}
 
-		// Strict BUY: price above EMA20+SMA50+VWAP, RSI bullish, ADX trending, volume
-		// Block in daily downtrends — 4H bullish signals are bear-market traps.
+		// Strict BUY: price above EMA20+SMA50+VWAP, RSI bullish, ADX trending, volume.
+		// Symmetric with Strict SELL — pure indicator alignment required on both sides.
 		vwapBullish := vwap20 == 0 || latestPrice > vwap20
 		if latestPrice > ema20 && latestPrice > sma50 && vwapBullish &&
-			rsi14 > 50 && dailyADX > 25 && volSurge && !dailyBearish {
+			rsi14 > 50 && dailyADX > 25 && volSurge {
 			masterAction = ACTION_BUY
 			masterReason = fmt.Sprintf("Strict BUY: above EMA20+SMA50+VWAP, RSI %.0f>50, ADX %.0f>25, vol %.2fx.", rsi14, dailyADX, volRatio)
 			masterStrategy = "Strict Buy"
@@ -171,20 +150,22 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	}
 
 	// ── TIER 5: Mean Reversion Extremes ──────────────────────────────
-	if masterAction == ACTION_HOLD {
-		// Oversold bounce: only valid in ranging markets WITHOUT a daily downtrend.
-		// In a bearish trend, oversold just means "it's still going down."
+	// Mean reversion only works when price is near its average (within the range).
+	// If price has crashed far below EMA20, "oversold" is continuation not reversal.
+	// Guard: price must be within 8% of EMA20 for the bounce to be structurally valid.
+	// Symmetric: same 8% distance check on the overbought SELL side.
+	if masterAction == ACTION_HOLD && ema20 > 0 {
+		priceDistFromEMA := math.Abs(latestPrice-ema20) / ema20
 		if wrPct <= -85 && rsi14 < 30 && volRatio >= 2.0 &&
-			currentRegime == REGIME_RANGING && !dailyBearish {
+			currentRegime == REGIME_RANGING && priceDistFromEMA <= 0.08 {
 			masterAction = ACTION_BUY
-			masterReason = fmt.Sprintf("Oversold BUY: W%%R %.0f≤-85, RSI %.0f<30, vol %.2fx. Extreme mean reversion.", wrPct, rsi14, volRatio)
+			masterReason = fmt.Sprintf("Oversold BUY: W%%R %.0f≤-85, RSI %.0f<30, vol %.2fx, price within %.1f%% of EMA20.", wrPct, rsi14, volRatio, priceDistFromEMA*100)
 			masterStrategy = "Oversold Buy"
 		}
-		// Overbought rejection: only valid in ranging markets WITHOUT a daily uptrend.
 		if wrPct >= -15 && rsi14 > 70 && volRatio >= 2.0 &&
-			currentRegime == REGIME_RANGING && !dailyBullish {
+			currentRegime == REGIME_RANGING && priceDistFromEMA <= 0.08 {
 			masterAction = ACTION_SELL
-			masterReason = fmt.Sprintf("Overbought SELL: W%%R %.0f≥-15, RSI %.0f>70, vol %.2fx. Extreme rejection.", wrPct, rsi14, volRatio)
+			masterReason = fmt.Sprintf("Overbought SELL: W%%R %.0f≥-15, RSI %.0f>70, vol %.2fx, price within %.1f%% of EMA20.", wrPct, rsi14, volRatio, priceDistFromEMA*100)
 			masterStrategy = "Overbought Sell"
 		}
 	}
@@ -254,7 +235,9 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		}
 	} else if masterAction == ACTION_SELL {
 		belowVWAP := vwap20 == 0 || latestPrice < vwap20
-		if rsi14 < 50 && latestPrice < ema20 && belowVWAP && wrPct > -60 {
+		// W%R > -80: price is not yet at extreme oversold — still has room to fall.
+		// Was > -60 which never fired in genuine downtrends (W%R often -70 to -90).
+		if rsi14 < 50 && latestPrice < ema20 && belowVWAP && wrPct > -80 {
 			s0 = S0Signal{Active: true, Action: ACTION_SELL,
 				Reason: fmt.Sprintf("Momentum SELL: RSI %.0f<50, below EMA20+VWAP, W%%R %.0f (room to fall).", rsi14, wrPct)}
 		} else if dailyADX > 40 {
