@@ -68,10 +68,12 @@ func ParseAndComputeFunding(raw []byte) FundingSnapshot {
 
 	currentRate, _ := strconv.ParseFloat(res.Result.List[0].FundingRate, 64)
 
-	// Raised thresholds for genuine extremes:
-	// Negative extreme: shorts paying > 0.02%/8h = 0.06%/day = ~22%/year → squeeze risk
+	// Thresholds for genuine extremes:
+	// Negative extreme: shorts paying > 0.05%/8h = 0.15%/day = ~55%/year → squeeze risk
 	// Positive extreme: longs paying > 0.05%/8h = 0.15%/day = ~55%/year → dump risk
-	isNeg := currentRate < -0.0002
+	// Raised from -0.02% to -0.05% on the negative side to filter weak signals
+	// like -0.042% (ARKM case) that barely qualified but lacked real squeeze pressure.
+	isNeg := currentRate < -0.0005
 	isPos := currentRate > 0.0005
 
 	return FundingSnapshot{
@@ -138,9 +140,9 @@ func EvaluateS4FundingContrarian(funding FundingSnapshot, oi OISnapshot) S4Signa
 		return sig
 	}
 
-	// EXTREME NEGATIVE: shorts paying > 0.02%/8h. Market overleveraged SHORT.
+	// EXTREME NEGATIVE: shorts paying > 0.05%/8h. Market overleveraged SHORT.
 	// Shorts must de-risk or face liquidation → contrarian BUY (short squeeze).
-	if funding.CurrentRate < -0.0002 {
+	if funding.CurrentRate < -0.0005 {
 		sig.Active = true
 		sig.Action = ACTION_BUY
 		sig.Reason = fmt.Sprintf(

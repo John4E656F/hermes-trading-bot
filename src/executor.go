@@ -130,13 +130,36 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 	}
 
 	// ── Set Isolated Margin ───────────────────────────────────────────
-	e.Client.PostPrivateRequest("/v5/position/set-leverage", map[string]interface{}{
-		"category":     "linear",
-		"symbol":       symbol,
-		"tradeMode":    1,
-		"buyLeverage":  strconv.Itoa(e.MaxLeverage),
-		"sellLeverage": strconv.Itoa(e.MaxLeverage),
-	})
+	// NOTE: On Bybit Unified Trading Accounts (UTA), tradeMode=1 (isolated)
+	// may be rejected if the account is in portfolio margin mode. We log the
+	// result so you can see in the output whether isolated margin is actually set.
+	// If positions show "Cross" on Bybit, the account type doesn't support
+	// per-symbol isolation — consider switching to a Standard account.
+	{
+		leverageResp, leverageErr := e.Client.PostPrivateRequest("/v5/position/set-leverage", map[string]interface{}{
+			"category":     "linear",
+			"symbol":       symbol,
+			"tradeMode":    1,
+			"buyLeverage":  strconv.Itoa(e.MaxLeverage),
+			"sellLeverage": strconv.Itoa(e.MaxLeverage),
+		})
+		if leverageErr != nil {
+			fmt.Printf("   ⚠️ Margin mode set FAILED (%v) — position may use Cross margin\n", leverageErr)
+		} else {
+			var lvRes struct {
+				RetCode int    `json:"retCode"`
+				RetMsg  string `json:"retMsg"`
+			}
+			if json.Unmarshal(leverageResp, &lvRes) == nil {
+				if lvRes.RetCode == 0 {
+					fmt.Printf("   ✅ Isolated margin set: %dx leverage\n", e.MaxLeverage)
+				} else {
+					fmt.Printf("   ⚠️ Margin mode rejected (code %d: %s) — position may use Cross margin\n",
+						lvRes.RetCode, lvRes.RetMsg)
+				}
+			}
+		}
+	}
 
 	// ── Position sizing ───────────────────────────────────────────────
 	var stopLossPrice, takeProfitPrice, limitPriceStr, side string
