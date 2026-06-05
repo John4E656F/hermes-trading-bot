@@ -8,13 +8,14 @@ import (
 
 // ─── Feature 1: Max Position Guard ───────────────────────────────────────
 
-// fetchOpenPositionCount queries Bybit for active linear positions whose
-// symbols appear in our watchlist.  Returns the count so the caller can
-// enforce the max-concurrent-exposure freeze (5/5).
-func fetchOpenPositionCount(client *BybitClient, watchlist []string) (int, error) {
+// fetchOpenPositions queries Bybit for active linear positions whose symbols
+// appear in our watchlist. Returns:
+//   - count: total open positions (for the 5/5 freeze)
+//   - openSymbols: map[symbol]side ("Buy"/"Sell") for per-symbol duplicate guard
+func fetchOpenPositions(client *BybitClient, watchlist []string) (int, map[string]string, error) {
 	respBytes, err := client.GetPrivateRequest("/v5/position/list?category=linear&settleCoin=USDT")
 	if err != nil {
-		return 0, fmt.Errorf("position list http: %w", err)
+		return 0, nil, fmt.Errorf("position list http: %w", err)
 	}
 
 	var resp struct {
@@ -24,30 +25,37 @@ func fetchOpenPositionCount(client *BybitClient, watchlist []string) (int, error
 			List []struct {
 				Symbol string `json:"symbol"`
 				Size   string `json:"size"`
+				Side   string `json:"side"` // "Buy" or "Sell"
 			} `json:"list"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(respBytes, &resp); err != nil {
-		return 0, fmt.Errorf("parse position list: %w", err)
+		return 0, nil, fmt.Errorf("parse position list: %w", err)
 	}
 	if resp.RetCode != 0 {
-		return 0, fmt.Errorf("bybit error [%d]: %s", resp.RetCode, resp.RetMsg)
+		return 0, nil, fmt.Errorf("bybit error [%d]: %s", resp.RetCode, resp.RetMsg)
 	}
 
-	// Build a set for O(1) lookup
 	watchSet := make(map[string]bool, len(watchlist))
 	for _, s := range watchlist {
 		watchSet[s] = true
 	}
 
+	openSymbols := make(map[string]string)
 	count := 0
 	for _, pos := range resp.Result.List {
-		// FIXED: Check for both "0" and empty string "" to accurately count active positions
 		if watchSet[pos.Symbol] && pos.Size != "0" && pos.Size != "" {
 			count++
+			openSymbols[pos.Symbol] = pos.Side
 		}
 	}
-	return count, nil
+	return count, openSymbols, nil
+}
+
+// fetchOpenPositionCount is kept for call sites that only need the count.
+func fetchOpenPositionCount(client *BybitClient, watchlist []string) (int, error) {
+	count, _, err := fetchOpenPositions(client, watchlist)
+	return count, err
 }
 
 // ─── Feature 2: Volume Profile Validation (helper) ───────────────────────
