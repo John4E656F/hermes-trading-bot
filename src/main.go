@@ -227,7 +227,10 @@ func main() {
 }
 
 // fetchLiveBalance calls Bybit's private wallet-balance endpoint and extracts
-// the totalAvailableBalance for USDT in the Unified account.
+// the total account equity for USDT in the Unified account.
+// totalEquity includes unrealized PnL and is what Bybit shows as the account value.
+// totalAvailableBalance (free margin) was wrong — it drops to ~$59 when $40 is
+// locked in open positions, making the bot think it has less capital than it does.
 func fetchLiveBalance(client *BybitClient) (float64, error) {
 	respBytes, err := client.GetPrivateRequest("/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT")
 	if err != nil {
@@ -239,10 +242,11 @@ func fetchLiveBalance(client *BybitClient) (float64, error) {
 		RetMsg  string `json:"retMsg"`
 		Result  struct {
 			List []struct {
-				TotalAvailableBalance string `json:"totalAvailableBalance"`
-				Coin                  []struct {
-					Coin          string `json:"coin"`
-					WalletBalance string `json:"walletBalance"`
+				TotalEquity        string `json:"totalEquity"`
+				TotalWalletBalance string `json:"totalWalletBalance"`
+				Coin               []struct {
+					Coin   string `json:"coin"`
+					Equity string `json:"equity"`
 				} `json:"coin"`
 			} `json:"list"`
 		} `json:"result"`
@@ -260,11 +264,19 @@ func fetchLiveBalance(client *BybitClient) (float64, error) {
 		return 0, fmt.Errorf("no wallet data in response")
 	}
 
-	// Prefer totalAvailableBalance; fall back to coin walletBalance.
-	balStr := resp.Result.List[0].TotalAvailableBalance
+	// totalEquity = wallet balance + unrealized PnL (matches Bybit UI "Equity").
+	// Fall back to totalWalletBalance, then coin-level equity.
+	acct := resp.Result.List[0]
+	balStr := acct.TotalEquity
 	if balStr == "" || balStr == "0" {
-		if len(resp.Result.List[0].Coin) > 0 {
-			balStr = resp.Result.List[0].Coin[0].WalletBalance
+		balStr = acct.TotalWalletBalance
+	}
+	if balStr == "" || balStr == "0" {
+		for _, c := range acct.Coin {
+			if c.Coin == "USDT" {
+				balStr = c.Equity
+				break
+			}
 		}
 	}
 
