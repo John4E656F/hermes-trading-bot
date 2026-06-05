@@ -280,20 +280,40 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 	}
 
 	// ── Activate EMA20-based trailing stop ────────────────────────────
+	// Activation price is set at the MIDPOINT between entry and TP so the
+	// trailing stop locks in profit well before the TP level.
+	// This means the two orders compete cleanly:
+	//   - Price hits midpoint  → trailing stop activates, starts following
+	//   - Price hits full TP   → TP fires first, position closed, trail cancelled
+	//   - Price reverses early → trailing stop closes at retracement (still in profit)
+	// Setting activePrice = takeProfitPrice (the old bug) caused both to fire
+	// at the same level, often closing below TP due to the retracement offset.
 	ema20 := CalculateEMA(candles4h, 20)
 	if ema20 > 0 {
 		trailDist := math.Abs(price - ema20)
 		if trailDist > 0 {
+			tpVal, _ := strconv.ParseFloat(takeProfitPrice, 64)
+			var activationPrice float64
+			if action == ACTION_BUY {
+				activationPrice = price + (tpVal-price)*0.5 // midpoint entry → TP
+			} else {
+				activationPrice = price - (price-tpVal)*0.5 // midpoint entry → TP
+			}
+			activationStr := strconv.FormatFloat(activationPrice, 'f', 4, 64)
+			if info.PriceStep > 0 {
+				activationPrice = math.Floor(activationPrice/info.PriceStep) * info.PriceStep
+				activationStr = strconv.FormatFloat(activationPrice, 'f', -1, 64)
+			}
 			trailPayload := map[string]interface{}{
 				"category":     "linear",
 				"symbol":       symbol,
 				"trailingStop": strconv.FormatFloat(trailDist, 'f', 4, 64),
-				"activePrice":  takeProfitPrice,
+				"activePrice":  activationStr,
 			}
 			if _, trailErr := e.Client.PostPrivateRequest("/v5/position/trading-stop", trailPayload); trailErr != nil {
 				fmt.Printf("   ⚠️ Trailing stop failed: %v\n", trailErr)
 			} else {
-				fmt.Printf("   🎯 Trailing stop: dist=$%.4f activates at $%s\n", trailDist, takeProfitPrice)
+				fmt.Printf("   🎯 Trailing stop: dist=$%.4f activates at $%s (midpoint to TP)\n", trailDist, activationStr)
 			}
 		}
 	}
