@@ -19,6 +19,7 @@ type StrategySignal struct {
 	S3         S3Signal
 	S4         S4Signal
 	S5         S5Signal
+	S6         S6Signal
 }
 
 // EvaluateMarketSnapshot is the core decision engine.
@@ -60,6 +61,7 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	s1 := EvaluateS1MeanReversion(latestPrice, asset.VP)
 	s2 := EvaluateS2Squeeze(asset.OI, asset.Funding, latestPrice, ema20)
 	s3 := EvaluateS3Breakout(latestPrice, asset.Consolidation, latestVol, avgVol)
+	s6 := EvaluateS6Kronos(asset.KronosPred, asset.KronosConf)
 
 	// ── Master Gate ───────────────────────────────────────────────────
 	// Default: HOLD. Only trigger on high-quality setups.
@@ -220,6 +222,7 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		S3:     s3,
 		S4:     s4,
 		S5:     s5,
+		S6:     s6,
 	}
 
 	// ── Conviction Scoring ────────────────────────────────────────────
@@ -243,6 +246,7 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		{"S3", s3.Active, s3.Action, s3.Reason},
 		{"S4", s4.Active, s4.Action, s4.Reason},
 		{"S5", s5.Active, s5.Action, s5.Reason},
+		{"S6", s6.Active, s6.Action, s6.Reason},
 	}
 	for _, sub := range subs {
 		if sub.active && sub.action == masterAction {
