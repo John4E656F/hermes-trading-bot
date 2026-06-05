@@ -93,6 +93,9 @@ type S3Signal struct { Active bool; Action SignalAction; Reason string; Primed b
 type S4Signal struct { Active bool; Action SignalAction; Reason string; FundingRate float64 }
 // S5: Bollinger Band Squeeze Breakout — energy-release signal after compression.
 type S5Signal struct { Active bool; Action SignalAction; Reason string; BBWidthPct float64 }
+// S6: Kronos AI Forecast — transformer model predicts next 3×4H candles.
+// Optional: bot runs normally when Kronos service is unavailable.
+type S6Signal struct { Active bool; Action SignalAction; Reason string; PredictedChangePct float64; Confidence float64 }
 
 type AssetSnapshot struct {
 	Symbol        string
@@ -103,6 +106,8 @@ type AssetSnapshot struct {
 	OI            OISnapshot
 	Funding       FundingSnapshot
 	Consolidation ConsolidationState
+	KronosPred    float64 // predicted % change from Kronos service (0 = unavailable)
+	KronosConf    float64 // Kronos confidence 0–1
 }
 
 // MarketData is the top-level result containing every tracked asset.

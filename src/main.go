@@ -185,6 +185,12 @@ func main() {
 	wg.Wait() // Block until all concurrent workers finish
 	fmt.Println("✅ Ingestion complete.")
 
+	// ── S6: Kronos AI batch prediction ────────────────────────────────
+	// Called after ingestion so all candle data is ready.
+	// Populates KronosPred/KronosConf on each AssetSnapshot in-place.
+	// No-ops silently if the Python service is not running.
+	FetchKronosPredictions(marketData.Assets)
+
 	printAndExecuteSignals(marketData, executor, forceSignalToggle, watchlist, freezeEntries, scanMode)
 
 	// ── Position Management: enforce max hold / trend flip ────────────
