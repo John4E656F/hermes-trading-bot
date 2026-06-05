@@ -73,10 +73,29 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	// ── TIER 1: Funding Rate Contrarian (LEADING signal) ─────────────
 	// S4 fires when market is structurally over-leveraged in one direction.
 	// This is predictive, not lagging — it's the highest-priority signal.
+	//
+	// Price Confirmation Guard: funding extremes only mean "crowd is wrong"
+	// when price has NOT already confirmed the crowd's direction.
+	// If price is >5% below SMA50 on a BUY signal, shorts are likely CORRECT
+	// and just paying funding to hold a winning position — not a squeeze setup.
 	if s4.Active {
-		masterAction = s4.Action
-		masterReason = s4.Reason
-		masterStrategy = "S4 Funding Contrarian"
+		blocked := false
+		if s4.Action == ACTION_BUY && sma50 > 0 && latestPrice < sma50*0.95 {
+			blocked = true
+			masterReason = fmt.Sprintf(
+				"S4 BUY blocked: price $%.4f is %.1f%% below SMA50 $%.4f — shorts may be correct, not over-leveraged. Need price recovery first.",
+				latestPrice, (1-latestPrice/sma50)*100, sma50)
+		} else if s4.Action == ACTION_SELL && sma50 > 0 && latestPrice > sma50*1.05 {
+			blocked = true
+			masterReason = fmt.Sprintf(
+				"S4 SELL blocked: price $%.4f is %.1f%% above SMA50 $%.4f — longs may be correct, not over-leveraged.",
+				latestPrice, (latestPrice/sma50-1)*100, sma50)
+		}
+		if !blocked {
+			masterAction = s4.Action
+			masterReason = s4.Reason
+			masterStrategy = "S4 Funding Contrarian"
+		}
 	}
 
 	// ── TIER 2: BB Squeeze Breakout (energy-release signal) ──────────
