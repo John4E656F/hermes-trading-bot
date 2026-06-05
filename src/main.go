@@ -28,7 +28,7 @@ func main() {
 	// Check for testing argument flags
 	forceSignalToggle := false
 	scanMode := false
-	useTop100 := false
+	watchlistSize := 0 // 0 = default 13, 13/50/100 = top N
 	for _, arg := range os.Args[1:] {
 		switch arg {
 		case "--force-signal":
@@ -37,9 +37,15 @@ func main() {
 		case "--mode=scan":
 			scanMode = true
 			fmt.Println("🔍 SCAN MODE ACTIVE: Reading market data, computing indicators, and ranking setups. No orders will be routed.")
+		case "--watchlist=top13":
+			watchlistSize = 13
+			fmt.Println("🔁 TOP 13 MODE: Scanning top 13 USDT pairs by 24h volume.")
+		case "--watchlist=top50":
+			watchlistSize = 50
+			fmt.Println("🔁 TOP 50 MODE: Scanning top 50 USDT pairs by 24h volume.")
 		case "--watchlist=top100":
-			useTop100 = true
-			fmt.Println("🔁 TOP 100 MODE: Fetching top USDT pairs by 24h volume instead of fixed watchlist.")
+			watchlistSize = 100
+			fmt.Println("🔁 TOP 100 MODE: Scanning top 100 USDT pairs by 24h volume.")
 		}
 	}
 
@@ -79,11 +85,11 @@ func main() {
 
 	// ── Build watchlist ──
 	var watchlist []string
-	if useTop100 {
+	if watchlistSize > 0 {
 		var err error
-		watchlist, err = client.FetchTopSymbols(100)
+		watchlist, err = client.FetchTopSymbols(watchlistSize)
 		if err != nil {
-			fmt.Printf("⚠️ Failed to fetch top 100: %v — falling back to default 13\n", err)
+			fmt.Printf("⚠️ Failed to fetch top %d: %v — falling back to default 13\n", watchlistSize, err)
 			watchlist = []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "SUIUSDT", "AVAXUSDT", "NEARUSDT", "APTUSDT", "LINKUSDT", "RENDERUSDT", "FETUSDT"}
 		} else {
 			fmt.Printf("📈 Scanning top %d USDT pairs by 24h volume\n", len(watchlist))
