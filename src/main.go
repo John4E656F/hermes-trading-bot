@@ -100,13 +100,21 @@ func main() {
 
 	// ── Max Position Guard ──
 	freezeEntries := false
+	openPositionSymbols := make(map[string]string) // symbol → side for per-symbol guard
 	if !scanMode {
-		openPosCount, err := fetchOpenPositionCount(client, watchlist)
+		openPosCount, openSyms, err := fetchOpenPositions(client, watchlist)
 		if err != nil {
 			fmt.Printf("⚠️ Position guard query failed: %v\n", err)
 			openPosCount = 0
+		} else {
+			openPositionSymbols = openSyms
 		}
 		fmt.Printf("📊 Active positions in watchlist: %d/5\n", openPosCount)
+		if len(openPositionSymbols) > 0 {
+			for sym, side := range openPositionSymbols {
+				fmt.Printf("   └─ %s %s (open — new entries on this symbol blocked)\n", sym, side)
+			}
+		}
 		freezeEntries = openPosCount >= 5
 		if freezeEntries {
 			fmt.Println("❄️ ENTRY FREEZE: Max concurrent exposure reached. All entry signals will be held.")
@@ -198,7 +206,7 @@ func main() {
 	marketAnalysis := AnalyzeMarket(marketData, watchlist)
 	PrintMarketAnalysis(marketAnalysis, len(watchlist))
 
-	printAndExecuteSignals(marketData, marketAnalysis, executor, forceSignalToggle, watchlist, freezeEntries, scanMode)
+	printAndExecuteSignals(marketData, marketAnalysis, executor, forceSignalToggle, watchlist, freezeEntries, scanMode, openPositionSymbols)
 
 	// ── Position Management: enforce max hold / trend flip ────────────
 	if !scanMode {
@@ -277,7 +285,7 @@ func parseFloat(s string) (float64, error) {
 	return v, nil
 }
 
-func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionEngine, forceActive bool, watchlist []string, freezeEntries bool, scanMode bool) {
+func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionEngine, forceActive bool, watchlist []string, freezeEntries bool, scanMode bool, openPositionSymbols map[string]string) {
 	fmt.Println("\n=========================================================================================")
 	fmt.Println("                          HERMES LIVE EXECUTION DASHBOARD                            ")
 	fmt.Println("=========================================================================================")
@@ -622,6 +630,14 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 							asset.Symbol, existingSide)
 						continue
 					}
+				}
+
+				// Per-symbol position guard: never open a new position on a symbol
+				// that already has an open position (prevents pyramid entries on losers).
+				if existingPosSide, hasPos := openPositionSymbols[asset.Symbol]; hasPos {
+					fmt.Printf("   🚫 [%s] Skipping — already have open %s position. No new entries on open symbols.\n",
+						asset.Symbol, existingPosSide)
+					continue
 				}
 
 				fmt.Printf("[%s] Conv%d/%.0f%% (%s) — executing.\n",
