@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"strings"
 )
 
 type StrategySignal struct {
@@ -19,8 +20,15 @@ type StrategySignal struct {
 	S3         S3Signal
 	S4         S4Signal
 	S5         S5Signal
-	S6         S6Signal
+	// Kronos is an optional AI overlay (nil when the service is unavailable).
+	// It does not vote like S0–S5 — it adjusts conviction/confidence after
+	// the master signal is determined. See the "Kronos AI Overlay" section.
+	Kronos *KronosPrediction
 }
+
+// globalKronosClient is set once at startup by main(). nil means the Kronos
+// service is unavailable — EvaluateMarketSnapshot then runs exactly as before.
+var globalKronosClient *KronosClient
 
 // EvaluateMarketSnapshot is the core decision engine.
 // Signal priority (highest to lowest):
@@ -61,7 +69,6 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	s1 := EvaluateS1MeanReversion(latestPrice, asset.VP)
 	s2 := EvaluateS2Squeeze(asset.OI, asset.Funding, latestPrice, ema20)
 	s3 := EvaluateS3Breakout(latestPrice, asset.Consolidation, latestVol, avgVol)
-	s6 := EvaluateS6Kronos(asset.KronosPred, asset.KronosConf)
 
 	// ── Master Gate ───────────────────────────────────────────────────
 	// Default: HOLD. Only trigger on high-quality setups.
@@ -255,7 +262,6 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		S3:     s3,
 		S4:     s4,
 		S5:     s5,
-		S6:     s6,
 	}
 
 	// ── Conviction Scoring ────────────────────────────────────────────
@@ -279,7 +285,6 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		{"S3", s3.Active, s3.Action, s3.Reason},
 		{"S4", s4.Active, s4.Action, s4.Reason},
 		{"S5", s5.Active, s5.Action, s5.Reason},
-		{"S6", s6.Active, s6.Action, s6.Reason},
 	}
 	for _, sub := range subs {
 		if sub.active && sub.action == masterAction {
@@ -362,6 +367,36 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		signal.Confidence = 0.85
 		signal.Strategy = "META: " + masterStrategy
 		signal.Reason = fmt.Sprintf("META (%d aligned) | %s | %s", agreeCount, masterReason, advancedReasons)
+	}
+
+	// ── Kronos AI Overlay (optional, additive only) ──────────────────
+	// Kronos does not vote in the conviction count above — it's a post-hoc
+	// adjustment layer. Agreement nudges conviction up by one point;
+	// disagreement trims confidence. The bot runs identically to before
+	// when the service is unavailable (globalKronosClient == nil).
+	if globalKronosClient != nil {
+		if pred, err := globalKronosClient.FetchPrediction(asset.Symbol); err == nil && pred != nil {
+			signal.Kronos = pred
+			kronosAction := ACTION_HOLD
+			switch strings.ToLower(pred.Direction) {
+			case "buy", "long":
+				kronosAction = ACTION_BUY
+			case "sell", "short":
+				kronosAction = ACTION_SELL
+			}
+
+			if kronosAction == masterAction && kronosAction != ACTION_HOLD {
+				if signal.Conviction < 3 {
+					signal.Conviction++
+				}
+				signal.Reason += fmt.Sprintf(" | 🤖 Kronos AI agrees: %s (zone=%s, conf=%.0f%%)",
+					strings.ToUpper(pred.Direction), pred.Zone, pred.Confidence*100)
+			} else if kronosAction != ACTION_HOLD && kronosAction != masterAction {
+				signal.Confidence -= 0.15
+				signal.Reason += fmt.Sprintf(" | ⚠️ Kronos AI disagrees: %s (zone=%s, conf=%.0f%%) — confidence trimmed",
+					strings.ToUpper(pred.Direction), pred.Zone, pred.Confidence*100)
+			}
+		}
 	}
 
 	// ── Funding Rate Headwind Penalty ─────────────────────────────────
