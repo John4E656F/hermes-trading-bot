@@ -51,6 +51,9 @@ func main() {
 
 	client := NewBybitClient()
 
+	// ── Kronos AI overlay: optional, graceful no-op if service is down ──
+	globalKronosClient = NewKronosClient()
+
 	// ── Position Management: run before new signals ───────────────────
 	// Move profitable positions to break-even and close stale ranging trades.
 	if !scanMode {
@@ -198,9 +201,6 @@ func main() {
 
 	wg.Wait() // Block until all concurrent workers finish
 	fmt.Println("✅ Ingestion complete.")
-
-	// ── S6: Kronos AI batch prediction ────────────────────────────────
-	FetchKronosPredictions(marketData.Assets)
 
 	// ── Market Conditions Analysis ────────────────────────────────────
 	marketAnalysis := AnalyzeMarket(marketData, watchlist)
