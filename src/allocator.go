@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 )
 
 type StrategySignal struct {
@@ -377,6 +378,8 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	if globalKronosClient != nil {
 		if pred, err := globalKronosClient.FetchPrediction(asset.Symbol); err == nil && pred != nil {
 			signal.Kronos = pred
+			preKronosConviction := signal.Conviction
+			preKronosConfidence := signal.Confidence
 			kronosAction := ACTION_HOLD
 			switch strings.ToLower(pred.Direction) {
 			case "buy", "long":
@@ -385,17 +388,39 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 				kronosAction = ACTION_SELL
 			}
 
+			agreement := "neutral"
 			if kronosAction == masterAction && kronosAction != ACTION_HOLD {
+				agreement = "agree"
 				if signal.Conviction < 3 {
 					signal.Conviction++
 				}
 				signal.Reason += fmt.Sprintf(" | 🤖 Kronos AI agrees: %s (zone=%s, conf=%.0f%%)",
 					strings.ToUpper(pred.Direction), pred.Zone, pred.Confidence*100)
 			} else if kronosAction != ACTION_HOLD && kronosAction != masterAction {
+				agreement = "disagree"
 				signal.Confidence -= 0.15
 				signal.Reason += fmt.Sprintf(" | ⚠️ Kronos AI disagrees: %s (zone=%s, conf=%.0f%%) — confidence trimmed",
 					strings.ToUpper(pred.Direction), pred.Zone, pred.Confidence*100)
 			}
+
+			// Log every Kronos prediction (agree, disagree, or neutral) so we can
+			// later join against realized price moves and measure whether Kronos
+			// or the indicator stack called the move correctly.
+			AppendKronosLog(KronosLogEntry{
+				Timestamp:        time.Now().UTC(),
+				Symbol:           asset.Symbol,
+				Price:            asset.CurrentPrice,
+				MasterAction:     masterAction,
+				MasterStrategy:   masterStrategy,
+				PreConviction:    preKronosConviction,
+				PreConfidence:    preKronosConfidence,
+				KronosDirection:  pred.Direction,
+				KronosZone:       pred.Zone,
+				KronosComposite:  pred.Composite,
+				KronosConfidence: pred.Confidence,
+				KronosPrice:      pred.Price,
+				Agreement:        agreement,
+			})
 		}
 	}
 
