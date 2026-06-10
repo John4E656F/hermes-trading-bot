@@ -1,18 +1,23 @@
 """
 Kronos AI Prediction Microservice for Hermes Trading Bot.
 
-Runs as a local HTTP server on port 8765. The Go bot calls /predict_batch
-once per 4H cycle with the last 90 candles per symbol, and this service
-returns predicted price change % for each symbol using the Kronos-mini model.
+Runs as a local HTTP server on port 8765. The Go bot calls /predict/{symbol}
+or /predict_batch with bare ticker symbols (e.g. "BTC"), and this service:
+  1. Fetches the last LOOKBACK 4H candles for that symbol from Bybit's public
+     kline API (no auth required).
+  2. Runs Kronos-base inference to forecast the next PRED_LEN candles.
+  3. Returns a direction/confidence/zone summary.
 
-First run downloads model weights (~50MB) from Hugging Face automatically.
+First run downloads model weights (~400MB) from Hugging Face automatically.
 
 Usage:
     python kronos_service.py
 
 Endpoints:
-    GET  /health         -> {"status":"ok","model":"Kronos-mini"}
-    POST /predict_batch  -> see below
+    GET  /                -> health check (alias of /health)
+    GET  /health          -> {"status":"ready"|"model_not_loaded","model":"Kronos-base"}
+    GET  /predict/<sym>   -> {"symbol","price","composite","zone","direction","confidence"}
+    POST /predict_batch   -> {"symbols":["BTC","ETH"]} -> [ {...}, {...} ]
 """
 
 import sys
@@ -20,13 +25,13 @@ import os
 import json
 import logging
 import traceback
+import urllib.request
 
 # Add Kronos model directory to Python path
-_script_dir = os.path.dirname(os.path.abspath(__file__))
-_kronos_dir = os.path.join(_script_dir, "Kronos")
-if os.path.isdir(_kronos_dir):
-    sys.path.insert(0, _kronos_dir)
-    logging.info(f"Added {_kronos_dir} to sys.path")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+KRONOS_REPO = os.path.join(SCRIPT_DIR, "Kronos")
+if KRONOS_REPO not in sys.path:
+    sys.path.insert(0, KRONOS_REPO)
 
 import numpy as np
 import pandas as pd
@@ -39,46 +44,37 @@ logging.basicConfig(
 )
 log = logging.getLogger("kronos")
 
-# ── Kronos repo path ─────────────────────────────────────────────────────────
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-KRONOS_REPO = os.path.join(SCRIPT_DIR, "Kronos")
-if KRONOS_REPO not in sys.path:
-    sys.path.insert(0, KRONOS_REPO)
-
 app = Flask(__name__)
-predictor = None  # Loaded once at startup
+predictor = None       # KronosPredictor instance, set by load_model()
+MODEL_NAME = "Kronos-base"
 
 # ── Prediction thresholds ─────────────────────────────────────────────────────
 # Signal fires only when predicted move exceeds this threshold.
 # Set conservatively — crypto is noisy and Kronos was trained on equity data.
-BUY_THRESHOLD_PCT  = 1.5   # > +1.5% predicted → BUY
-SELL_THRESHOLD_PCT = -1.5  # < -1.5% predicted → SELL
+BUY_THRESHOLD_PCT  = 1.5   # > +1.5% predicted -> BUY
+SELL_THRESHOLD_PCT = -1.5  # < -1.5% predicted -> SELL
 
 # Kronos inference parameters
-PRED_LEN     = 3    # predict next 3 × 4H candles (~12 hours)
-LOOKBACK     = 90   # historical context window
+PRED_LEN     = 3    # predict next 3 x 4H candles (~12 hours)
+LOOKBACK     = 90   # historical context window (candles)
 SAMPLE_COUNT = 2    # average N independent samples (reduces variance)
 TEMPERATURE  = 0.8
 TOP_P        = 0.95
 
+BYBIT_KLINE_URL = "https://api.bybit.com/v5/market/kline"
+
 
 def load_model():
-    """Load Kronos-base from Hugging Face (cached after first download)."""
+    """Load Kronos-base + tokenizer from Hugging Face (cached after first download)."""
     global predictor
-    log.info("Loading Kronos-base from HuggingFace Hub (~102.3M params, first run downloads ~400MB)...")
+    log.info("Loading %s from HuggingFace Hub (~102.3M params, first run downloads ~400MB)...", MODEL_NAME)
     try:
-        import torch
-        from huggingface_hub import hf_hub_download
         from model.kronos import KronosPredictor, Kronos, KronosTokenizer
 
-        # Download and load tokenizer
-        tokenizer_repo = "NeoQuasar/Kronos-Tokenizer-base"
-        tokenizer = KronosTokenizer.from_pretrained(tokenizer_repo)
+        tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
         tokenizer.eval()
 
-        # Download and load model
-        model_repo = "NeoQuasar/Kronos-base"
-        model = Kronos.from_pretrained(model_repo)
+        model = Kronos.from_pretrained("NeoQuasar/Kronos-base")
         model.eval()
 
         predictor = KronosPredictor(
@@ -88,88 +84,145 @@ def load_model():
             max_context=512,
             clip=5,
         )
-        log.info("Kronos-base loaded successfully (512 context, 102.3M params).")
+        log.info("%s loaded successfully (512 context, 102.3M params).", MODEL_NAME)
     except Exception as e:
-        log.error(f"Failed to load Kronos model: {e}")
+        log.error("Failed to load Kronos model: %s", e)
         log.error(traceback.format_exc())
         predictor = None
 
 
-def candles_to_df(candle_list: list) -> pd.DataFrame:
+def to_bybit_symbol(symbol: str) -> str:
+    """Normalize a bare ticker ("BTC") or pair ("BTCUSDT") to a Bybit linear symbol."""
+    sym = symbol.upper()
+    if not sym.endswith("USDT"):
+        sym += "USDT"
+    return sym
+
+
+def fetch_candles(symbol: str, interval: str = "240", limit: int = LOOKBACK) -> pd.DataFrame:
     """
-    Convert the JSON candle array from Go into a pandas DataFrame
-    with a DatetimeIndex, as required by KronosPredictor.predict().
+    Fetch the last `limit` candles for `symbol` from Bybit's public kline API
+    (category=linear, no authentication required). Returns a DataFrame indexed
+    by UTC timestamp, ascending order, with open/high/low/close/volume columns.
     """
+    bybit_symbol = to_bybit_symbol(symbol)
+    url = (f"{BYBIT_KLINE_URL}?category=linear&symbol={bybit_symbol}"
+           f"&interval={interval}&limit={limit}")
+
+    with urllib.request.urlopen(url, timeout=15) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+
+    if data.get("retCode") != 0:
+        raise RuntimeError(f"Bybit kline error [{data.get('retCode')}]: {data.get('retMsg')}")
+
+    rows = data.get("result", {}).get("list", [])
+    if not rows:
+        raise RuntimeError(f"no kline data returned for {bybit_symbol}")
+
+    # Bybit returns most-recent-first: [startTime, open, high, low, close, volume, turnover]
+    rows = list(reversed(rows))
     records = []
-    for c in candle_list:
+    timestamps = []
+    for r in rows:
+        timestamps.append(pd.to_datetime(int(r[0]), unit="ms", utc=True))
         records.append({
-            "open":   float(c["open"]),
-            "high":   float(c["high"]),
-            "low":    float(c["low"]),
-            "close":  float(c["close"]),
-            "volume": float(c.get("volume", 0)),
+            "open":   float(r[1]),
+            "high":   float(r[2]),
+            "low":    float(r[3]),
+            "close":  float(r[4]),
+            "volume": float(r[5]),
         })
 
     df = pd.DataFrame(records)
-    # Build a synthetic datetime index at 4H intervals ending now.
-    # Kronos needs timestamps for its temporal embeddings (hour, weekday, etc.)
-    end   = pd.Timestamp.utcnow().floor("4h")
-    start = end - pd.Timedelta(hours=4 * (len(df) - 1))
-    df.index = pd.date_range(start=start, end=end, periods=len(df), freq=None)
+    df.index = pd.DatetimeIndex(timestamps).tz_localize(None)
     return df
 
 
-def predict_symbol(symbol: str, candle_list: list) -> dict:
+def predict_symbol(symbol: str) -> dict:
     """
-    Run Kronos inference for one symbol.
-    Returns a dict with direction, change_pct, and confidence.
+    Fetch live candles for `symbol` and run Kronos inference.
+    Returns a dict with direction, change_pct, confidence, composite, zone, price.
     """
     if predictor is None:
-        return {"direction": "HOLD", "change_pct": 0.0, "confidence": 0.0,
+        return {"direction": "hold", "change_pct": 0.0, "confidence": 0.0,
+                "composite": 0.5, "zone": "neutral", "price": 0.0,
                 "error": "model not loaded"}
 
-    if len(candle_list) < 10:
-        return {"direction": "HOLD", "change_pct": 0.0, "confidence": 0.0,
+    try:
+        df = fetch_candles(symbol)
+    except Exception as e:
+        log.warning("  %s: candle fetch failed - %s", symbol, e)
+        return {"direction": "hold", "change_pct": 0.0, "confidence": 0.0,
+                "composite": 0.5, "zone": "neutral", "price": 0.0,
+                "error": f"candle fetch failed: {e}"}
+
+    if len(df) < 10:
+        return {"direction": "hold", "change_pct": 0.0, "confidence": 0.0,
+                "composite": 0.5, "zone": "neutral", "price": 0.0,
                 "error": "insufficient candles"}
 
     try:
-        df = candles_to_df(candle_list[-LOOKBACK:])
-        current_close = df["close"].iloc[-1]
+        current_close = float(df["close"].iloc[-1])
+
+        x_timestamp = pd.Series(df.index)
+        last_ts = df.index[-1]
+        y_timestamp = pd.Series(pd.date_range(
+            start=last_ts + pd.Timedelta(hours=4), periods=PRED_LEN, freq="4h"))
 
         pred_df = predictor.predict(
-            data=df,
+            df=df[["open", "high", "low", "close", "volume"]],
+            x_timestamp=x_timestamp,
+            y_timestamp=y_timestamp,
             pred_len=PRED_LEN,
-            temperature=TEMPERATURE,
+            T=TEMPERATURE,
             top_p=TOP_P,
             sample_count=SAMPLE_COUNT,
+            verbose=False,
         )
 
         # Average predicted close across the forecast horizon
-        mean_pred_close = pred_df["close"].mean()
+        mean_pred_close = float(pred_df["close"].mean())
         change_pct = (mean_pred_close - current_close) / current_close * 100.0
 
-        # Confidence proxy: inverse of predicted high-low range as % of price
-        # Tight predicted range → model is more certain
+        # Confidence proxy: inverse of predicted high-low range as % of price.
+        # Tight predicted range -> model is more certain.
         pred_range_pct = (pred_df["high"].max() - pred_df["low"].min()) / current_close * 100.0
         confidence = max(0.0, min(1.0, 1.0 - (pred_range_pct / 20.0)))
 
-        if change_pct >= BUY_THRESHOLD_PCT:
-            direction = "BUY"
-        elif change_pct <= SELL_THRESHOLD_PCT:
-            direction = "SELL"
+        # composite: 0..1 sentiment score derived from predicted change.
+        # 0.5 = neutral, >0.5 = bullish, <0.5 = bearish. +/-10% change saturates it.
+        composite = max(0.0, min(1.0, 0.5 + change_pct / 20.0))
+        if composite < 0.4:
+            zone = "fear"
+        elif composite > 0.6:
+            zone = "greed"
         else:
-            direction = "HOLD"
+            zone = "neutral"
 
-        log.info(f"  {symbol}: change={change_pct:+.2f}% dir={direction} conf={confidence:.2f}")
+        if change_pct >= BUY_THRESHOLD_PCT:
+            direction = "buy"
+        elif change_pct <= SELL_THRESHOLD_PCT:
+            direction = "sell"
+        else:
+            direction = "hold"
+
+        log.info("  %s: price=%.4f change=%+.2f%% dir=%s conf=%.2f zone=%s",
+                 symbol, current_close, change_pct, direction, confidence, zone)
+
         return {
             "direction":  direction,
             "change_pct": round(change_pct, 4),
             "confidence": round(confidence, 4),
+            "composite":  round(composite, 4),
+            "zone":       zone,
+            "price":      current_close,
         }
 
     except Exception as e:
-        log.warning(f"  {symbol}: inference failed — {e}")
-        return {"direction": "HOLD", "change_pct": 0.0, "confidence": 0.0,
+        log.warning("  %s: inference failed - %s", symbol, e)
+        log.warning(traceback.format_exc())
+        return {"direction": "hold", "change_pct": 0.0, "confidence": 0.0,
+                "composite": 0.5, "zone": "neutral", "price": 0.0,
                 "error": str(e)}
 
 
@@ -179,21 +232,21 @@ def predict_symbol(symbol: str, candle_list: list) -> dict:
 @app.route("/health")
 def health():
     return jsonify({
-        "status": "ok" if predictor is not None else "model_not_loaded",
-        "model":  "Kronos-mini",
+        "status": "ready" if predictor is not None else "model_not_loaded",
+        "model":  MODEL_NAME,
     })
 
 
 @app.route("/predict/<symbol>")
 def predict_single(symbol):
-    """GET /predict/{symbol} — single-symbol prediction, no candles = momentum fallback."""
-    result = predict_symbol(symbol, [])
+    """GET /predict/{symbol} -> single-symbol prediction using live candles."""
+    result = predict_symbol(symbol)
     return jsonify({
         "symbol":     symbol,
-        "price":      0.0,
-        "composite":  0.5,
-        "zone":       "neutral",
-        "direction":  result.get("direction", "HOLD").lower(),
+        "price":      result.get("price", 0.0),
+        "composite":  result.get("composite", 0.5),
+        "zone":       result.get("zone", "neutral"),
+        "direction":  result.get("direction", "hold"),
         "confidence": result.get("confidence", 0.0),
     })
 
@@ -201,45 +254,28 @@ def predict_single(symbol):
 @app.route("/predict_batch", methods=["POST"])
 def predict_batch():
     """
-    Accepts TWO body formats:
-      A) { "symbols": ["BTC", "ETH"] }          — Go bot's format (no candles)
-      B) { "requests": [ {"symbol":"BTC", "candles":[...]}, ... ] }  — full format
-
-    Response (for format A):
-        [ {"symbol":"BTC", "direction":"buy", "confidence":0.71, ...}, ... ]
+    POST /predict_batch
+    Body: {"symbols": ["BTC", "ETH"]}
+    Response: [ {"symbol":"BTC","price":...,"composite":...,"zone":...,"direction":...,"confidence":...}, ... ]
     """
     body = request.get_json(force=True, silent=True)
-    if not body:
-        return jsonify({"error": "empty body"}), 400
+    if not body or "symbols" not in body or not isinstance(body["symbols"], list):
+        return jsonify({"error": "expected JSON body {\"symbols\": [\"BTC\", ...]}"}), 400
 
-    # Format A: Go bot sends {"symbols": ["BTC", "ETH"]}
-    if "symbols" in body and isinstance(body["symbols"], list):
-        bare_syms = body["symbols"]
-        log.info(f"Batch predict (symbols-only): {len(bare_syms)} symbol(s)")
-        results = []
-        for sym in bare_syms:
-            result = predict_symbol(sym, [])  # no candles = momentum fallback
-            results.append({
-                "symbol":     sym,
-                "price":      0.0,
-                "composite":  0.5,
-                "zone":       "neutral",
-                "direction":  result.get("direction", "HOLD").lower(),
-                "confidence": result.get("confidence", 0.0),
-            })
-        return jsonify(results)
-
-    # Format B: {"requests": [{"symbol": "BTC", "candles": [...]}]}
-    if "requests" in body:
-        log.info(f"Batch predict (with candles): {len(body['requests'])} symbol(s)")
-        predictions = {}
-        for req in body["requests"]:
-            sym     = req.get("symbol", "?")
-            candles = req.get("candles", [])
-            predictions[sym] = predict_symbol(sym, candles)
-        return jsonify({"predictions": predictions})
-
-    return jsonify({"error": "missing 'symbols' or 'requests' field"}), 400
+    symbols = body["symbols"]
+    log.info("Batch predict: %d symbol(s)", len(symbols))
+    results = []
+    for sym in symbols:
+        result = predict_symbol(sym)
+        results.append({
+            "symbol":     sym,
+            "price":      result.get("price", 0.0),
+            "composite":  result.get("composite", 0.5),
+            "zone":       result.get("zone", "neutral"),
+            "direction":  result.get("direction", "hold"),
+            "confidence": result.get("confidence", 0.0),
+        })
+    return jsonify(results)
 
 
 # ── Entry ─────────────────────────────────────────────────────────────────────
