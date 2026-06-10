@@ -24,7 +24,7 @@ type SignalSnapshotEntry struct {
 	SkipReason string       `json:"skip_reason,omitempty"`
 }
 
-const signalLogPath = "../signal_log.jsonl"
+const signalLogPath = "signal_log.jsonl"
 
 // AppendSignalSnapshot writes one JSON line per evaluated signal to
 // signal_log.jsonl. Run analyze_signals.py later to compare each entry's
