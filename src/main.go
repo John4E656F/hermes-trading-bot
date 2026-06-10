@@ -224,6 +224,13 @@ func main() {
 		PrintRecentClosedPnLSummary(client)
 		UpdateTradeOutcomes(client)
 	}
+
+	// ── Resolve 24h-old Kronos predictions against current prices ──────
+	prices := make(map[string]float64, len(marketData.Assets))
+	for symbol, asset := range marketData.Assets {
+		prices[symbol] = asset.CurrentPrice
+	}
+	ResolveKronosOutcomes(prices)
 }
 
 // fetchLiveBalance calls Bybit's private wallet-balance endpoint and extracts

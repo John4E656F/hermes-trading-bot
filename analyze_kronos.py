@@ -1,38 +1,19 @@
 #!/usr/bin/env python3
 """
-Analyze kronos_log.jsonl: for every Kronos AI prediction logged by the bot,
-fetch the current live price and compare it to the price at prediction time
-to see whether Kronos or the bot's own indicator-based master signal called
-the move correctly.
+Analyze kronos_outcomes.jsonl: each entry is a Kronos AI prediction that has
+been resolved 24h after it was logged, comparing Kronos's directional call
+against the bot's own master signal and the actual 24h price move.
+
+The Go bot writes this file automatically (ResolveKronosOutcomes, run once
+per cycle) — it joins kronos_log.jsonl entries that are >=24h old against the
+live price at resolution time. Nothing to fetch here; just summarize.
 
 Usage:
     python3 analyze_kronos.py
 """
 import json
-import time
-import requests
 
-LOG_PATH = "kronos_log.jsonl"
-
-
-def fetch_price(symbol):
-    resp = requests.get(
-        f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}",
-        timeout=10,
-    )
-    data = resp.json()
-    if data.get("retCode") != 0:
-        return None
-    return float(data["result"]["list"][0]["lastPrice"])
-
-
-def direction_correct(direction, change_pct):
-    direction = direction.lower()
-    if direction in ("buy", "long"):
-        return change_pct > 0
-    if direction in ("sell", "short"):
-        return change_pct < 0
-    return None  # hold/neutral - no call made
+LOG_PATH = "kronos_outcomes.jsonl"
 
 
 def main():
@@ -40,76 +21,66 @@ def main():
         with open(LOG_PATH) as f:
             lines = [json.loads(l) for l in f if l.strip()]
     except FileNotFoundError:
-        print(f"{LOG_PATH} not found — no Kronos predictions logged yet.")
+        print(f"{LOG_PATH} not found — no Kronos predictions have reached the "
+              f"24h resolution horizon yet.")
         return
 
     if not lines:
-        print("No entries yet.")
+        print("No resolved entries yet.")
         return
 
-    price_cache = {}
-    stats = {
-        "agree": {"kronos_right": 0, "kronos_wrong": 0, "no_call": 0},
-        "disagree": {"kronos_right": 0, "master_right": 0, "both_wrong": 0, "both_right": 0, "no_call": 0},
-        "neutral": {"kronos_right": 0, "kronos_wrong": 0, "no_call": 0},
-    }
+    # agreement -> {"kronos_correct":n, "kronos_incorrect":n, "master_correct":n, "master_incorrect":n, ...}
+    stats = {}
 
-    print(f"{'Symbol':<14} {'Agreement':<10} {'Master':<5} {'Kronos':<6} {'PredPrice':>12} {'NowPrice':>12} {'Chg%':>7}")
-    print("-" * 75)
+    print(f"{'Symbol':<12} {'Agreement':<10} {'Master':<5} {'Kronos':<6} "
+          f"{'EntryPx':>12} {'ExitPx':>12} {'Chg%':>7} {'MasterRes':<10} {'KronosRes':<10}")
+    print("-" * 95)
 
     for entry in lines:
-        symbol = entry["symbol"]
-        if symbol not in price_cache:
-            price_cache[symbol] = fetch_price(symbol)
-            time.sleep(0.1)  # be polite to the API
-        now_price = price_cache[symbol]
-        pred_price = entry.get("price") or entry.get("kronos_price")
-        if not now_price or not pred_price:
-            continue
-
-        change_pct = (now_price - pred_price) / pred_price * 100.0
         agreement = entry.get("agreement", "neutral")
-        master = entry.get("master_action", "HOLD")
-        kronos_dir = entry.get("kronos_direction", "hold")
+        bucket = stats.setdefault(agreement, {
+            "kronos_correct": 0, "kronos_incorrect": 0, "kronos_no_call": 0,
+            "master_correct": 0, "master_incorrect": 0, "master_no_call": 0,
+        })
 
-        kronos_ok = direction_correct(kronos_dir, change_pct)
-        master_ok = direction_correct(master, change_pct)
+        master_res = entry.get("master_result", "no_call")
+        kronos_res = entry.get("kronos_result", "no_call")
+        bucket[f"master_{master_res}"] = bucket.get(f"master_{master_res}", 0) + 1
+        bucket[f"kronos_{kronos_res}"] = bucket.get(f"kronos_{kronos_res}", 0) + 1
 
-        bucket = stats.setdefault(agreement, {"kronos_right": 0, "kronos_wrong": 0, "no_call": 0,
-                                                "master_right": 0, "both_wrong": 0, "both_right": 0})
-
-        if agreement == "disagree":
-            if kronos_ok is None and master_ok is None:
-                bucket["no_call"] += 1
-            elif kronos_ok and not master_ok:
-                bucket["kronos_right"] += 1
-            elif master_ok and not kronos_ok:
-                bucket["master_right"] += 1
-            elif kronos_ok and master_ok:
-                bucket["both_right"] += 1
-            else:
-                bucket["both_wrong"] += 1
-        else:
-            if kronos_ok is None:
-                bucket["no_call"] += 1
-            elif kronos_ok:
-                bucket["kronos_right"] += 1
-            else:
-                bucket["kronos_wrong"] += 1
-
-        print(f"{symbol:<14} {agreement:<10} {master:<5} {kronos_dir:<6} "
-              f"{pred_price:>12.4f} {now_price:>12.4f} {change_pct:>6.2f}%")
+        print(f"{entry['symbol']:<12} {agreement:<10} {entry.get('master_action', '?'):<5} "
+              f"{entry.get('kronos_direction', '?'):<6} "
+              f"{entry.get('entry_price', 0):>12.4f} {entry.get('exit_price', 0):>12.4f} "
+              f"{entry.get('change_pct', 0):>6.2f}% {master_res:<10} {kronos_res:<10}")
 
     print()
-    print("=== Summary ===")
+    print("=== Summary (24h-resolved predictions) ===")
     for agreement, bucket in stats.items():
-        total = sum(bucket.values())
-        if total == 0:
-            continue
-        print(f"\n{agreement.upper()} ({total} predictions):")
-        for k, v in bucket.items():
-            if v:
-                print(f"  {k}: {v} ({v/total*100:.0f}%)")
+        master_total = bucket.get("master_correct", 0) + bucket.get("master_incorrect", 0)
+        kronos_total = bucket.get("kronos_correct", 0) + bucket.get("kronos_incorrect", 0)
+        print(f"\n{agreement.upper()}:")
+        if master_total:
+            print(f"  Master signal correct: {bucket.get('master_correct', 0)}/{master_total} "
+                  f"({bucket.get('master_correct', 0)/master_total*100:.0f}%)")
+        if kronos_total:
+            print(f"  Kronos correct:        {bucket.get('kronos_correct', 0)}/{kronos_total} "
+                  f"({bucket.get('kronos_correct', 0)/kronos_total*100:.0f}%)")
+
+    # Specific callout: when they disagreed, who was right more often?
+    if "disagree" in stats:
+        d = stats["disagree"]
+        m_total = d.get("master_correct", 0) + d.get("master_incorrect", 0)
+        k_total = d.get("kronos_correct", 0) + d.get("kronos_incorrect", 0)
+        if m_total and k_total:
+            print("\n=== When Kronos disagreed with the master signal ===")
+            print(f"  Master was right {d.get('master_correct',0)}/{m_total} times "
+                  f"({d.get('master_correct',0)/m_total*100:.0f}%)")
+            print(f"  Kronos was right {d.get('kronos_correct',0)}/{k_total} times "
+                  f"({d.get('kronos_correct',0)/k_total*100:.0f}%)")
+            if d.get('kronos_correct',0)/k_total > d.get('master_correct',0)/m_total:
+                print("  -> Consider trusting Kronos more on disagreement (increase confidence trim).")
+            else:
+                print("  -> Current confidence trim on disagreement looks justified.")
 
 
 if __name__ == "__main__":
