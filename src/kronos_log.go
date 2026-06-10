@@ -28,7 +28,7 @@ type KronosLogEntry struct {
 	Agreement        string       `json:"agreement"` // "agree" | "disagree" | "neutral"
 }
 
-const kronosLogPath = "../kronos_log.jsonl"
+const kronosLogPath = "kronos_log.jsonl"
 
 // AppendKronosLog writes one JSON line per Kronos prediction to kronos_log.jsonl.
 // A later script can join these records (by symbol + timestamp) against
@@ -70,7 +70,7 @@ type KronosOutcomeEntry struct {
 	KronosResult    string       `json:"kronos_result"` // "correct" | "incorrect" | "no_call"
 }
 
-const kronosOutcomePath = "../kronos_outcomes.jsonl"
+const kronosOutcomePath = "kronos_outcomes.jsonl"
 
 // directionResult classifies whether `action` (a SignalAction or Kronos
 // direction string) correctly called the sign of changePct.
