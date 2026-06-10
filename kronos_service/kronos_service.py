@@ -21,6 +21,13 @@ import json
 import logging
 import traceback
 
+# Add Kronos model directory to Python path
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_kronos_dir = os.path.join(_script_dir, "Kronos")
+if os.path.isdir(_kronos_dir):
+    sys.path.insert(0, _kronos_dir)
+    logging.info(f"Added {_kronos_dir} to sys.path")
+
 import numpy as np
 import pandas as pd
 from flask import Flask, request, jsonify
@@ -56,17 +63,32 @@ TOP_P        = 0.95
 
 
 def load_model():
-    """Load Kronos-mini from Hugging Face (cached after first download)."""
+    """Load Kronos-base from Hugging Face (cached after first download)."""
     global predictor
-    log.info("Loading Kronos-mini from HuggingFace Hub (first run downloads ~50MB)...")
+    log.info("Loading Kronos-base from HuggingFace Hub (~102.3M params, first run downloads ~400MB)...")
     try:
-        from model.kronos import KronosPredictor
+        import torch
+        from huggingface_hub import hf_hub_download
+        from model.kronos import KronosPredictor, Kronos, KronosTokenizer
+
+        # Download and load tokenizer
+        tokenizer_repo = "NeoQuasar/Kronos-Tokenizer-base"
+        tokenizer = KronosTokenizer.from_pretrained(tokenizer_repo)
+        tokenizer.eval()
+
+        # Download and load model
+        model_repo = "NeoQuasar/Kronos-base"
+        model = Kronos.from_pretrained(model_repo)
+        model.eval()
+
         predictor = KronosPredictor(
-            tokenizer_path="NeoQuasar/Kronos-Tokenizer-2k",
-            model_path="NeoQuasar/Kronos-mini",
+            model=model,
+            tokenizer=tokenizer,
             device="cpu",
+            max_context=512,
+            clip=5,
         )
-        log.info("Kronos-mini loaded successfully.")
+        log.info("Kronos-base loaded successfully (512 context, 102.3M params).")
     except Exception as e:
         log.error(f"Failed to load Kronos model: {e}")
         log.error(traceback.format_exc())
@@ -153,6 +175,7 @@ def predict_symbol(symbol: str, candle_list: list) -> dict:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+@app.route("/")  # Go bot probes this on startup
 @app.route("/health")
 def health():
     return jsonify({
@@ -161,27 +184,62 @@ def health():
     })
 
 
+@app.route("/predict/<symbol>")
+def predict_single(symbol):
+    """GET /predict/{symbol} — single-symbol prediction, no candles = momentum fallback."""
+    result = predict_symbol(symbol, [])
+    return jsonify({
+        "symbol":     symbol,
+        "price":      0.0,
+        "composite":  0.5,
+        "zone":       "neutral",
+        "direction":  result.get("direction", "HOLD").lower(),
+        "confidence": result.get("confidence", 0.0),
+    })
+
+
 @app.route("/predict_batch", methods=["POST"])
 def predict_batch():
     """
-    Body:
-        { "requests": [ {"symbol": "BTCUSDT", "candles": [{open,high,low,close,volume,ts}, ...]}, ... ] }
+    Accepts TWO body formats:
+      A) { "symbols": ["BTC", "ETH"] }          — Go bot's format (no candles)
+      B) { "requests": [ {"symbol":"BTC", "candles":[...]}, ... ] }  — full format
 
-    Response:
-        { "predictions": { "BTCUSDT": {"direction":"BUY","change_pct":2.3,"confidence":0.75}, ... } }
+    Response (for format A):
+        [ {"symbol":"BTC", "direction":"buy", "confidence":0.71, ...}, ... ]
     """
     body = request.get_json(force=True, silent=True)
-    if not body or "requests" not in body:
-        return jsonify({"error": "missing 'requests' field"}), 400
+    if not body:
+        return jsonify({"error": "empty body"}), 400
 
-    log.info(f"Batch predict: {len(body['requests'])} symbol(s)")
-    predictions = {}
-    for req in body["requests"]:
-        sym     = req.get("symbol", "?")
-        candles = req.get("candles", [])
-        predictions[sym] = predict_symbol(sym, candles)
+    # Format A: Go bot sends {"symbols": ["BTC", "ETH"]}
+    if "symbols" in body and isinstance(body["symbols"], list):
+        bare_syms = body["symbols"]
+        log.info(f"Batch predict (symbols-only): {len(bare_syms)} symbol(s)")
+        results = []
+        for sym in bare_syms:
+            result = predict_symbol(sym, [])  # no candles = momentum fallback
+            results.append({
+                "symbol":     sym,
+                "price":      0.0,
+                "composite":  0.5,
+                "zone":       "neutral",
+                "direction":  result.get("direction", "HOLD").lower(),
+                "confidence": result.get("confidence", 0.0),
+            })
+        return jsonify(results)
 
-    return jsonify({"predictions": predictions})
+    # Format B: {"requests": [{"symbol": "BTC", "candles": [...]}]}
+    if "requests" in body:
+        log.info(f"Batch predict (with candles): {len(body['requests'])} symbol(s)")
+        predictions = {}
+        for req in body["requests"]:
+            sym     = req.get("symbol", "?")
+            candles = req.get("candles", [])
+            predictions[sym] = predict_symbol(sym, candles)
+        return jsonify({"predictions": predictions})
+
+    return jsonify({"error": "missing 'symbols' or 'requests' field"}), 400
 
 
 # ── Entry ─────────────────────────────────────────────────────────────────────
