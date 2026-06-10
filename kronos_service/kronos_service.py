@@ -211,11 +211,11 @@ def predict_symbol(symbol: str) -> dict:
 
         return {
             "direction":  direction,
-            "change_pct": round(change_pct, 4),
-            "confidence": round(confidence, 4),
-            "composite":  round(composite, 4),
+            "change_pct": float(round(change_pct, 4)),
+            "confidence": float(round(confidence, 4)),
+            "composite":  float(round(composite, 4)),
             "zone":       zone,
-            "price":      current_close,
+            "price":      float(current_close),
         }
 
     except Exception as e:
