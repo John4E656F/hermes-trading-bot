@@ -620,7 +620,25 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 			fmt.Printf("🟢 NORMAL TRADING: $%.2f — all Conviction 2+ signals active.\n", data.LiveBalance)
 		}
 
-		if !capitalBlocked {
+		// ── Signal Snapshot Logging ────────────────────────────────────
+		// Record every non-HOLD candidate this cycle (executed or skipped, and
+		// why) so analyze_signals.py can later check whether skipped signals
+		// would have been profitable (missed opportunity) or would have lost
+		// (gate working as intended).
+		outcomes := make(map[string]struct {
+			Executed   bool
+			SkipReason string
+		})
+		allCandidates := append(append([]RankedSignal{}, tradableBuys...), tradableSells...)
+
+		if capitalBlocked {
+			for _, c := range filtered {
+				outcomes[c.Asset.Symbol] = struct {
+					Executed   bool
+					SkipReason string
+				}{false, fmt.Sprintf("circuit breaker: balance $%.2f below $20 minimum", data.LiveBalance)}
+			}
+		} else {
 			for _, c := range filtered {
 				asset := c.Asset
 				sig := c.Signal
@@ -628,6 +646,10 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 				if sig.Conviction < minConviction || sig.Confidence < 0.70 {
 					fmt.Printf("   [%s] Conv%d/%.0f%% — below threshold (need Conv%d/70%%). Logged only.\n",
 						asset.Symbol, sig.Conviction, sig.Confidence*100, minConviction)
+					outcomes[asset.Symbol] = struct {
+						Executed   bool
+						SkipReason string
+					}{false, fmt.Sprintf("below threshold: Conv%d/%.0f%% (need Conv%d/70%%)", sig.Conviction, sig.Confidence*100, minConviction)}
 					continue
 				}
 
@@ -640,6 +662,10 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 					if existingSide == wantSide {
 						fmt.Printf("   ⏸️ [%s] Skipping — %s limit already queued from previous cycle.\n",
 							asset.Symbol, existingSide)
+						outcomes[asset.Symbol] = struct {
+							Executed   bool
+							SkipReason string
+						}{false, "limit order already queued from previous cycle"}
 						continue
 					}
 				}
@@ -649,6 +675,10 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 				if existingPosSide, hasPos := openPositionSymbols[asset.Symbol]; hasPos {
 					fmt.Printf("   🚫 [%s] Skipping — already have open %s position. No new entries on open symbols.\n",
 						asset.Symbol, existingPosSide)
+					outcomes[asset.Symbol] = struct {
+						Executed   bool
+						SkipReason string
+					}{false, fmt.Sprintf("already have open %s position", existingPosSide)}
 					continue
 				}
 
@@ -656,8 +686,36 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 					asset.Symbol, sig.Conviction, sig.Confidence*100, sig.Strategy)
 				if err := exec.ExecuteBracketTrade(sig, asset); err != nil {
 					fmt.Printf("   Execution failed: %v\n\n", err)
+					outcomes[asset.Symbol] = struct {
+						Executed   bool
+						SkipReason string
+					}{false, fmt.Sprintf("execution failed: %v", err)}
+				} else {
+					outcomes[asset.Symbol] = struct {
+						Executed   bool
+						SkipReason string
+					}{true, ""}
 				}
 			}
+		}
+
+		for _, c := range allCandidates {
+			outcome, ok := outcomes[c.Asset.Symbol]
+			if !ok {
+				outcome.SkipReason = "ranked outside top 3 (lower conviction/gain)"
+			}
+			AppendSignalSnapshot(SignalSnapshotEntry{
+				Timestamp:  time.Now().UTC(),
+				Symbol:     c.Asset.Symbol,
+				Price:      c.Asset.CurrentPrice,
+				Action:     c.Signal.Action,
+				Strategy:   c.Signal.Strategy,
+				Conviction: c.Signal.Conviction,
+				Confidence: c.Signal.Confidence,
+				Gain7D:     c.Gain7D,
+				Executed:   outcome.Executed,
+				SkipReason: outcome.SkipReason,
+			})
 		}
 	}
 	fmt.Println("=========================================================================================")
