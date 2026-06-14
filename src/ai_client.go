@@ -83,7 +83,13 @@ Given a signal context, return ONLY valid JSON, no markdown, no extra text:
 Rules:
 - REJECT if ATR=0 or Conviction<2
 - REJECT if buying with WilliamsR>-20 (overbought) or selling with WilliamsR<-80 (oversold)
-- REJECT if FundingRate>0.0003 on a BUY (longs already over-leveraged — mean reversion risk)
+
+S4 FUNDING CONTRARIAN rules (overrides generic funding rules below):
+- S4 SELL fires when funding is POSITIVE (longs overleveraged, paying to stay). CONFIRM.
+- S4 BUY fires when funding is NEGATIVE (shorts overleveraged, paying to stay). CONFIRM.
+
+Generic funding rules (NOT when S4 is the strategy):
+- REJECT if FundingRate>0.0003 on a BUY (longs already over-leveraged)
 - REJECT if FundingRate<-0.0001 on a SELL (shorts already crowded)
 - CONFIRM S4 Funding Contrarian when funding extreme AND OI_Spike=true (crowd trapped)
 - CONFIRM S5 BB Squeeze when BBWidth<4% (genuine compression before breakout)
