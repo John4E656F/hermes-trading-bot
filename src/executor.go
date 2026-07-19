@@ -249,7 +249,7 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 	if slPrice > 0 && positionSizeTokens > 0 {
 		actualRisk := math.Abs(price-slPrice) * positionSizeTokens
 		targetRisk := e.TotalCapital * riskPct
-		if actualRisk > targetRisk*1.5 {
+		if actualRisk > targetRisk*2.0 {
 			entry.Executed = false
 			entry.SkipReason = fmt.Sprintf("SIZE GUARD: actual SL risk $%.2f > 1.5× target $%.2f", actualRisk, targetRisk)
 			AppendTradeLog(entry)
