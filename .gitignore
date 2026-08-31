@@ -1,35 +1,4 @@
-# ── Compiled binaries ──
-/hermes-bot
-/botedition
-src/src
-*.exe
-*.test
-
-# ── Go mod cache ──
-/vendor/
-
-# ── Environment / Secrets ──
 .env
-*.env.local
-**/*credentials*
-**/secrets*
-
-# ── IDE / Editor ──
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# ── OS files ──
-.DS_Store
-Thumbs.db
-
-# ── Runtime logs ──
-*.log
-!/.gitignore
-
-# ── Go test cache ──
-*.out
-*.cov
-src/src
+kronos_env/
+__pycache__/
+*.pyc
