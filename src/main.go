@@ -23,7 +23,7 @@ func main() {
 	os.Stdout.Sync()
 
 	// Attempt to load .env file if present, and overload any shell variables
-	_ = godotenv.Overload("../.env")
+	_ = godotenv.Overload(".env")
 
 	// Check for testing argument flags
 	forceSignalToggle := false
