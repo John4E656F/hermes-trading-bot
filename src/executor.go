@@ -16,7 +16,7 @@ const (
 
 type ExecutionEngine struct {
 	Client       *BybitClient
-	AI           *AIClient
+	AICouncil    *AICouncilClient
 	MaxLeverage  int
 	TotalCapital float64
 }
@@ -24,10 +24,51 @@ type ExecutionEngine struct {
 func NewExecutionEngine(client *BybitClient, capital float64) *ExecutionEngine {
 	return &ExecutionEngine{
 		Client:       client,
-		AI:           NewAIClient(),
+		AICouncil:    NewAICouncilClient(),
 		MaxLeverage:  3,
 		TotalCapital: capital,
 	}
+}
+
+// EvaluateSignalCouncil runs the AI Council gate for display/scan purposes without
+// placing any orders. Returns the council result and a human-readable line for the dashboard.
+func (e *ExecutionEngine) EvaluateSignalCouncil(sig StrategySignal, asset *AssetSnapshot) (CouncilResult, string) {
+	var councilResult CouncilResult
+	var councilLine string
+
+	if e.AICouncil == nil || e.AICouncil.APIKey == "" {
+		councilResult = CouncilResult{
+			FinalVerdict:     "UNAVAILABLE",
+			Confidence:       0.0,
+			ConsensusSummary: "No OpenRouter API key configured",
+		}
+		councilLine = "   🤖 AI Council: UNAVAILABLE (no API key)"
+		return councilResult, councilLine
+	}
+
+	// Only evaluate non-HOLD signals to save API costs
+	if sig.Action == ACTION_HOLD {
+		councilLine = "   🤖 AI Council: SKIPPED (signal is HOLD)"
+		return councilResult, councilLine
+	}
+
+	sentimentBlock := ""
+	if globalSentimentReport.TopCryptoNews != "" || len(globalSentimentReport.SymbolSentiment) > 0 {
+		sentimentBlock = globalSentimentReport.FormatForPrompt()
+	}
+
+	r := e.AICouncil.EvaluateSignal(sig, asset, sentimentBlock)
+	councilResult = r
+
+	if r.ErroredCount == len(councilMembers) {
+		councilLine = fmt.Sprintf("   ❌ AI Council: ALL %d MODELS ERRORED", len(councilMembers))
+	} else {
+		councilLine = fmt.Sprintf("   🤖 AI Council: %s (%.0f%%) — %d confirm / %d reject (%d errors)",
+			r.FinalVerdict, r.Confidence*100,
+			r.ConfirmCount, r.RejectCount, r.ErroredCount)
+	}
+
+	return councilResult, councilLine
 }
 
 // ExecuteBracketTrade places a limit bracket order (entry + SL + TP) after passing
@@ -71,25 +112,33 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 		WalletBal:   e.TotalCapital,
 	}
 
-	// ── AI Validation Gate ────────────────────────────────────────────
-	// Always log the AI opinion whether we proceed or not.
-	aiResult, aiErr := e.AI.ValidateSignal(sig, asset)
-	if aiErr != nil {
-		fmt.Printf("   ⚠️ AI gate unavailable (%v) — proceeding on local signal.\n", aiErr)
-		entry.AIVerdict = "UNAVAILABLE"
-		entry.AIReason = aiErr.Error()
+	// ── AI Council Gate ────────────────────────────────────────────────
+	// Uses the pre-computed council result from the signal loop.
+	// If unavailable, evaluates on-demand (no sentiment context in that case).
+	var councilResult *CouncilResult
+	if sig.AICouncilResult != nil {
+		councilResult = sig.AICouncilResult
 	} else {
-		entry.AIVerdict = aiResult.Verdict
-		entry.AIConfidence = aiResult.Confidence
-		entry.AIReason = aiResult.Explanation
-		fmt.Printf("   🤖 AI: %s (%.0f%%) — %s\n",
-			aiResult.Verdict, aiResult.Confidence*100, aiResult.Explanation)
-		if aiResult.Verdict == "REJECTED" {
-			entry.Executed = false
-			entry.SkipReason = "AI rejected: " + aiResult.Explanation
-			AppendTradeLog(entry)
-			return fmt.Errorf("AI GATE: signal rejected — %s", aiResult.Explanation)
+		sentimentBlock := ""
+		if globalSentimentReport.TopCryptoNews != "" || len(globalSentimentReport.SymbolSentiment) > 0 {
+			sentimentBlock = globalSentimentReport.FormatForPrompt()
 		}
+		r := e.AICouncil.EvaluateSignal(sig, asset, sentimentBlock)
+		councilResult = &r
+		sig.AICouncilResult = councilResult
+	}
+	entry.AIVerdict = councilResult.FinalVerdict
+	entry.AIConfidence = councilResult.Confidence
+	entry.AIReason = councilResult.ConsensusSummary
+	fmt.Printf("   🤖 AI Council: %s (%.0f%%) — %d confirm / %d reject (%d errors)\n",
+		councilResult.FinalVerdict, councilResult.Confidence*100,
+		councilResult.ConfirmCount, councilResult.RejectCount, councilResult.ErroredCount)
+
+	if councilResult.FinalVerdict == "REJECTED" {
+		entry.Executed = false
+		entry.SkipReason = truncate("AI Council rejected: "+councilResult.ConsensusSummary, 200)
+		AppendTradeLog(entry)
+		return fmt.Errorf("AI COUNCIL: signal rejected — %s", truncate(councilResult.ConsensusSummary, 100))
 	}
 
 	// ── Dynamic risk sizing by confidence ────────────────────────────
