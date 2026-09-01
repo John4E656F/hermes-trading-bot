@@ -28,7 +28,8 @@ func main() {
 	// Check for testing argument flags
 	forceSignalToggle := false
 	scanMode := false
-	watchlistSize := 0 // 0 = default 13, 13/50/100 = top N
+	dryRunMode := false
+	watchlistSize := 100 // default: top 100 USDT pairs by 24h volume
 	for _, arg := range os.Args[1:] {
 		switch arg {
 		case "--force-signal":
@@ -37,6 +38,10 @@ func main() {
 		case "--mode=scan":
 			scanMode = true
 			fmt.Println("🔍 SCAN MODE ACTIVE: Reading market data, computing indicators, and ranking setups. No orders will be routed.")
+		case "--mode=dry":
+			scanMode = true
+			dryRunMode = true
+			fmt.Println("🧪 DRY-RUN MODE ACTIVE: Full signal + AI Council evaluation. No orders will be routed.")
 		case "--watchlist=top13":
 			watchlistSize = 13
 			fmt.Println("🔁 TOP 13 MODE: Scanning top 13 USDT pairs by 24h volume.")
@@ -47,6 +52,10 @@ func main() {
 			watchlistSize = 100
 			fmt.Println("🔁 TOP 100 MODE: Scanning top 100 USDT pairs by 24h volume.")
 		}
+	}
+	// Remove old top13-only banner since default is now top100
+	if watchlistSize == 100 {
+		fmt.Println("🔁 TOP 100 MODE (default): Scanning top 100 USDT pairs by 24h volume.")
 	}
 
 	client := NewBybitClient()
@@ -214,11 +223,24 @@ func main() {
 	wg.Wait() // Block until all concurrent workers finish
 	fmt.Println("✅ Ingestion complete.")
 
+	// ── Pre-fetch market sentiment (news, social) for AI Council ──
+	coingeckoKey := os.Getenv("COINGECKO_API_KEY")
+	globalSentimentReport = FetchMarketSentiment(watchlist, coingeckoKey)
+	if !scanMode {
+		fmt.Println("📰 Pre-fetched market sentiment for AI Council.")
+	}
+
+	// ── Compute reflection memory (past win rates per symbol) ─────
+	reflections := ComputeReflections()
+	if reflections != nil {
+		fmt.Printf("📖 Reflection: %d symbols profiled from outcomes data.\n", len(reflections))
+	}
+
 	// ── Market Conditions Analysis ────────────────────────────────────
 	marketAnalysis := AnalyzeMarket(marketData, watchlist)
 	PrintMarketAnalysis(marketAnalysis, len(watchlist))
 
-	printAndExecuteSignals(marketData, marketAnalysis, executor, forceSignalToggle, watchlist, freezeEntries, scanMode, openPositionSymbols)
+	printAndExecuteSignals(marketData, marketAnalysis, executor, forceSignalToggle, watchlist, freezeEntries, scanMode, dryRunMode, openPositionSymbols)
 
 	// ── Position Management: enforce max hold / trend flip ────────────
 	if !scanMode {
@@ -316,7 +338,7 @@ func parseFloat(s string) (float64, error) {
 	return v, nil
 }
 
-func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionEngine, forceActive bool, watchlist []string, freezeEntries bool, scanMode bool, openPositionSymbols map[string]string) {
+func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionEngine, forceActive bool, watchlist []string, freezeEntries bool, scanMode bool, dryRunMode bool, openPositionSymbols map[string]string) {
 	fmt.Println("\n=========================================================================================")
 	fmt.Println("                          HERMES LIVE EXECUTION DASHBOARD                            ")
 	fmt.Println("=========================================================================================")
@@ -371,6 +393,27 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 			freezeBanner,
 		)
 		fmt.Printf("   ┗━ Local Reason: %s\n", sig.Reason)
+
+		// ── AI Council Evaluation for non-HOLD signals (scan + dry + live) ──
+		if sig.Action != ACTION_HOLD {
+			councilResult, councilLine := exec.EvaluateSignalCouncil(sig, asset)
+			fmt.Println(councilLine)
+
+			// Store result back in signalMap for downstream use
+			sig.AICouncilResult = &councilResult
+			signalMap[symbol] = sig
+
+			// In dry-run mode, show per-model votes for transparency
+			if dryRunMode && councilResult.Votes != nil {
+				for _, v := range councilResult.Votes {
+					if v.Error != "" {
+						fmt.Printf("      └─ %s: ERROR (%s)\n", v.Model, v.Error)
+					} else {
+						fmt.Printf("      └─ %s: %s (%.0f%% conf, %dms)\n", v.Model, v.Verdict, v.Confidence*100, v.LatencyMs)
+					}
+				}
+			}
+		}
 
 		gain7d := Compute7DayGain(asset.Snap1d.Candles)
 

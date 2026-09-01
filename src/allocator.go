@@ -25,6 +25,12 @@ type StrategySignal struct {
 	// It does not vote like S0–S5 — it adjusts conviction/confidence after
 	// the master signal is determined. See the "Kronos AI Overlay" section.
 	Kronos *KronosPrediction
+	// Reflection tracks past win rates for this symbol, attached after
+	// the master signal is computed. Used to adjust confidence.
+	Reflection *ReflectionSummary
+	// AICouncilResult is filled in by the AI council (in executor.go) after
+	// the indicator pre-filter passes. Empty until then.
+	AICouncilResult *CouncilResult
 }
 
 // globalKronosClient is set once at startup by main(). nil means the Kronos
@@ -35,6 +41,10 @@ var globalKronosClient *KronosClient
 // signal evaluation loop. When populated, EvaluateMarketSnapshot reads from
 // this cache instead of making individual /predict calls per asset.
 var globalKronosPredictions map[string]KronosPrediction
+
+// globalSentimentReport is set by main() before signal evaluation.
+// When populated, the AI Council prompt includes news/social context.
+var globalSentimentReport MarketSentimentReport
 
 // EvaluateMarketSnapshot is the core decision engine.
 // Signal priority (highest to lowest):
@@ -453,7 +463,7 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		signal.Kronos = kronosPred
 	}
 
-	// ── Funding Rate Headwind Penalty ─────────────────────────────────
+// ── Funding Rate Headwind Penalty ─────────────────────────────────
 	// When funding runs against our direction (but isn't extreme enough to block),
 	// reduce confidence by 20% — the funding cost erodes our edge.
 	if masterAction == ACTION_BUY && asset.Funding.CurrentRate > 0.0003 {
@@ -478,10 +488,24 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	// ── Risk Cap on extended moves ────────────────────────────────────
 	if gain7d > 25.0 && gain7d <= 40.0 && signal.Confidence > 0.70 {
 		signal.Confidence = 0.70
-		signal.Reason += fmt.Sprintf(" | ⚠️ risk-capped (7D +%.0f%%)", gain7d)
+		signal.Reason += fmt.Sprintf(" | ⚠️ risk-capped (7D +%.0f%%", gain7d)
 	} else if gain7d < -25.0 && gain7d >= -40.0 && signal.Confidence > 0.70 {
 		signal.Confidence = 0.70
-		signal.Reason += fmt.Sprintf(" | ⚠️ risk-capped (7D %.0f%%)", gain7d)
+		signal.Reason += fmt.Sprintf(" | ⚠️ risk-capped (7D %.0f%%", gain7d)
+	}
+
+	// ── Reflection Overlay ────────────────────────────────────────────
+	// Read past performance for this symbol and apply confidence multiplier.
+	// Computed from kronos_outcomes.jsonl — tracks per-symbol master signal win rate.
+	if ref := GetReflection(asset.Symbol); ref != nil {
+		signal.Reflection = ref
+		oldConf := signal.Confidence
+		signal.Confidence = math.Min(signal.Confidence*ref.ConfidenceMultiplier, 0.95)
+		if signal.Confidence != oldConf {
+			signal.Reason += fmt.Sprintf(" | Reflection: %.0f%% WR → %.1fx mult (conf %.0f%%→%.0f%%)",
+				ref.WinRate*100, ref.ConfidenceMultiplier, oldConf*100, signal.Confidence*100)
+		}
+		signal.Reason += fmt.Sprintf(" | Lesson: %s", ref.Lesson)
 	}
 
 	return signal
