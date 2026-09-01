@@ -2,3 +2,6 @@
 kronos_env/
 __pycache__/
 *.pyc
+*.swp
+hermes-bot
+botedition
