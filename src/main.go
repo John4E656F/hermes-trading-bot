@@ -101,6 +101,9 @@ func main() {
 		watchlist = []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "SUIUSDT", "AVAXUSDT", "NEARUSDT", "APTUSDT", "LINKUSDT", "RENDERUSDT", "FETUSDT"}
 	}
 
+	// ── Kronos prediction cache: populated by concurrent workers ─────
+	globalKronosPredictions = make(map[string]KronosPrediction)
+
 	// ── Max Position Guard ──
 	freezeEntries := false
 	openPositionSymbols := make(map[string]string) // symbol → side for per-symbol guard
@@ -183,6 +186,15 @@ func main() {
 			oiSnap := ParseAndComputeOI(oiRaw)
 			fundSnap := ParseAndComputeFunding(fundingRaw)
 			consol := DetectConsolidation(candles1d, 21, 5.0)
+
+			// Fetch Kronos prediction — runs inside semaphore so it parallelizes with other workers
+			if globalKronosClient != nil {
+				if pred, err := globalKronosClient.FetchPrediction(sym); err == nil && pred != nil {
+					mu.Lock()
+					globalKronosPredictions[sym] = *pred
+					mu.Unlock()
+				}
+			}
 
 			mu.Lock()
 			marketData.Assets[sym] = &AssetSnapshot{

@@ -31,14 +31,52 @@ type StrategySignal struct {
 // service is unavailable — EvaluateMarketSnapshot then runs exactly as before.
 var globalKronosClient *KronosClient
 
+// globalKronosPredictions is a batch-fetched map set by main() before the
+// signal evaluation loop. When populated, EvaluateMarketSnapshot reads from
+// this cache instead of making individual /predict calls per asset.
+var globalKronosPredictions map[string]KronosPrediction
+
 // EvaluateMarketSnapshot is the core decision engine.
 // Signal priority (highest to lowest):
 //
+//	KRONOS AI → PRIMARY signal when service is up and direction != hold
 //	S4 Funding Contrarian → LEADING signal, fires on extreme funding
 //	S5 BB Squeeze Breakout → energy release after compression
 //	Trend / Volume signals → lagging but reliable in strong regimes
+//	S1/S2/S3 → supporting, never generate alone
 //
 // Only returns non-HOLD when a signal has been independently verified.
+// With Kronos as primary, the AI prediction seeds the direction, then the
+// indicator stack acts as confirmation (raises conviction) or vetoes (blocks).
+
+// getKronosPrediction returns the Kronos prediction for a symbol by checking
+// the batch cache first, then falling back to a per-symbol request.
+func getKronosPrediction(symbol string) *KronosPrediction {
+	if globalKronosClient == nil {
+		return nil
+	}
+	if p, ok := globalKronosPredictions[symbol]; ok {
+		return &p
+	}
+	pred, err := globalKronosClient.FetchPrediction(symbol)
+	if err != nil || pred == nil {
+		return nil
+	}
+	return pred
+}
+
+// kronosToAction maps a Kronos direction string to a SignalAction.
+func kronosToAction(direction string) SignalAction {
+	switch strings.ToLower(direction) {
+	case "buy", "long":
+		return ACTION_BUY
+	case "sell", "short":
+		return ACTION_SELL
+	default:
+		return ACTION_HOLD
+	}
+}
+
 func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	dailyADX := asset.Snap1d.Indicators.ADX14
 	currentRegime := ClassifyRegime(dailyADX)
@@ -78,7 +116,42 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	masterStrategy := "HOLD"
 	volSurge := volRatio >= 1.5
 
+	// ── Kronos Prime: AI prediction is the PRIMARY signal seed ─────────
+	// When the Kronos service is up and returns a directional prediction
+	// (buy/sell, not hold), that direction overrides masterAction. The
+	// indicator stack below then acts as confirmation (raises conviction)
+	// or veto (S4 funding conflict / exhaustion / squeeze lock).
+	// If Kronos is hold or unavailable, the indicator tiers run as before.
+	kronosPred := getKronosPrediction(asset.Symbol)
+	if kronosPred != nil {
+		ka := kronosToAction(kronosPred.Direction)
+		if ka != ACTION_HOLD {
+			masterAction = ka
+			masterStrategy = "Kronos AI"
+			masterReason = fmt.Sprintf("Kronos AI predicts %s (direction=%s, zone=%s, conf=%.0f%%)",
+				strings.ToUpper(kronosPred.Direction), kronosPred.Direction, kronosPred.Zone, kronosPred.Confidence*100)
+		}
+		// Log every Kronos prediction so we can later join against
+		// realized price moves and measure AI vs indicator accuracy.
+		AppendKronosLog(KronosLogEntry{
+			Timestamp:        time.Now().UTC(),
+			Symbol:           asset.Symbol,
+			Price:            asset.CurrentPrice,
+			MasterAction:     ka,
+			MasterStrategy:   "Kronos AI",
+			PreConviction:    0,
+			PreConfidence:    kronosPred.Confidence,
+			KronosDirection:  kronosPred.Direction,
+			KronosZone:       kronosPred.Zone,
+			KronosComposite:  kronosPred.Composite,
+			KronosConfidence: kronosPred.Confidence,
+			KronosPrice:      kronosPred.Price,
+			Agreement:        "primary",
+		})
+	}
+
 	// ── TIER 1: Funding Rate Contrarian (LEADING signal) ─────────────
+	// Only fires when masterAction is still HOLD (Kronos didn't override).
 	// S4 fires when market is structurally over-leveraged in one direction.
 	// This is predictive, not lagging — it's the highest-priority signal.
 	//
@@ -370,58 +443,14 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		signal.Reason = fmt.Sprintf("META (%d aligned) | %s | %s", agreeCount, masterReason, advancedReasons)
 	}
 
-	// ── Kronos AI Overlay (optional, additive only) ──────────────────
-	// Kronos does not vote in the conviction count above — it's a post-hoc
-	// adjustment layer. Agreement nudges conviction up by one point;
-	// disagreement trims confidence. The bot runs identically to before
-	// when the service is unavailable (globalKronosClient == nil).
-	if globalKronosClient != nil {
-		if pred, err := globalKronosClient.FetchPrediction(asset.Symbol); err == nil && pred != nil {
-			signal.Kronos = pred
-			preKronosConviction := signal.Conviction
-			preKronosConfidence := signal.Confidence
-			kronosAction := ACTION_HOLD
-			switch strings.ToLower(pred.Direction) {
-			case "buy", "long":
-				kronosAction = ACTION_BUY
-			case "sell", "short":
-				kronosAction = ACTION_SELL
-			}
-
-			agreement := "neutral"
-			if kronosAction == masterAction && kronosAction != ACTION_HOLD {
-				agreement = "agree"
-				if signal.Conviction < 3 {
-					signal.Conviction++
-				}
-				signal.Reason += fmt.Sprintf(" | 🤖 Kronos AI agrees: %s (zone=%s, conf=%.0f%%)",
-					strings.ToUpper(pred.Direction), pred.Zone, pred.Confidence*100)
-			} else if kronosAction != ACTION_HOLD && kronosAction != masterAction {
-				agreement = "disagree"
-				signal.Confidence -= 0.15
-				signal.Reason += fmt.Sprintf(" | ⚠️ Kronos AI disagrees: %s (zone=%s, conf=%.0f%%) — confidence trimmed",
-					strings.ToUpper(pred.Direction), pred.Zone, pred.Confidence*100)
-			}
-
-			// Log every Kronos prediction (agree, disagree, or neutral) so we can
-			// later join against realized price moves and measure whether Kronos
-			// or the indicator stack called the move correctly.
-			AppendKronosLog(KronosLogEntry{
-				Timestamp:        time.Now().UTC(),
-				Symbol:           asset.Symbol,
-				Price:            asset.CurrentPrice,
-				MasterAction:     masterAction,
-				MasterStrategy:   masterStrategy,
-				PreConviction:    preKronosConviction,
-				PreConfidence:    preKronosConfidence,
-				KronosDirection:  pred.Direction,
-				KronosZone:       pred.Zone,
-				KronosComposite:  pred.Composite,
-				KronosConfidence: pred.Confidence,
-				KronosPrice:      pred.Price,
-				Agreement:        agreement,
-			})
-		}
+	// ── Kronos AI Overlay (signal assignment only) ────────────────────
+	// The Kronos prediction was already fetched and logged in the Kronos
+	// Prime block above. Here we just attach it to the signal struct for
+	// downstream consumers (dashboard, logging, replay analysis).
+	// When Kronos seeded the primary direction, the indicator stack's
+	// agreement is already reflected in the conviction score above.
+	if kronosPred != nil {
+		signal.Kronos = kronosPred
 	}
 
 	// ── Funding Rate Headwind Penalty ─────────────────────────────────
