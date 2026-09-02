@@ -1,6 +1,6 @@
 # 🤖 Hermes Trading Bot
 
-**Multi‑asset crypto swing trading engine with AI‑verified execution, live risk guards, and a Three-Layer Meta-Strategy allocation.**
+**Multi‑asset crypto swing trading engine with 5‑model AI Council validation, reflection memory, market sentiment pre‑fetch, and multi‑layer risk guards.**
 
 ![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go) ![Bybit](https://img.shields.io/badge/Bybit_V5_API-Live-F7A600) ![OpenRouter](https://img.shields.io/badge/AI_Gateway-OpenRouter-8A2BE2) ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -8,106 +8,142 @@
 
 ## 🚀 Overview
 
-Hermes is a **production‑grade swing trading bot** that ingests live OHLCV data from Bybit, computes technical indicators locally in pure Go, evaluates setups across three independent strategy lenses (Mean Reversion, Open Interest/Funding Squeeze, and Multi-Week Breakout), and executes bracket orders with AI‑verified signals.
+Hermes is a **production‑grade swing trading bot** that ingests live OHLCV data from Bybit, evaluates signals across 6 strategy lenses (S0–S5), validates trades through a **5‑model AI Council** via OpenRouter, and executes bracket orders with dynamic position sizing, trailing stops, and multi‑layer risk protection.
 
-The entire pipeline runs autonomously via crontab, with **zero external dependencies** (Go stdlib only) and **no paid API subscriptions** for the math engine.
+It runs autonomously via cron every hour, scanning the **top 50 USDT pairs by volume** and delivering a full dashboard to Telegram.
 
 ---
 
 ## ✨ Features
 
-### 📊 Data Ingestion & Dynamic Watchlists
-- **Dynamic Watchlist Scanning**: Use `--watchlist=top100` to automatically fetch and scan the top 100 USDT pairs by 24h turnover, or rely on the default fixed 13-asset list.
-- **Bybit V5 REST API**: Fetches 4‑hour & daily OHLCV candles, real-time Open Interest, and Funding Rate history.
-- **Rate‑limit friendly**: Concurrent data fetching with a 10-goroutine semaphore pool to respect Bybit rate limits.
+### 📊 Data Ingestion & Watchlists
+- **Top 50 by default** — fetches the 50 highest-volume USDT pairs by 24h turnover
+- **Concurrent pipeline** — 10‑goroutine semaphore pool for rate‑limit safety
+- **All endpoints** — 4h/1d OHLCV, Open Interest, Funding Rate history, wallet balance
+- **Configurable scan size** — `--watchlist=top13`, `--watchlist=top50`, `--watchlist=top100`
 
-### 🧠 Three-Layer Meta-Strategy (Pure Go)
+### 🧠 5-Model AI Council
+All non‑HOLD signals are validated by **5 independent LLMs** voting on trade quality:
 
-The bot evaluates each asset across three independent lenses to calculate a `Conviction` score (1, 2, or 3):
+| Model | Provider | Timeout |
+|-------|----------|--------|
+| **DeepSeek V4 Flash** | OpenRouter | 20s |
+| **Claude Sonnet** | OpenRouter | 25s |
+| **Gemini 2.5 Flash** | OpenRouter | 15s |
+| **GPT-4o** | OpenRouter | 25s |
+| **GLM 5.3 Flash** | Z.ai via OpenRouter | 15s |
 
-1. **Strategy 1: Mean Reversion (Volume Profile)**
-   - Computes a dynamically sizing 50-bin volume profile.
-   - Triggers buys below the Value Area Low (VAL) and sells above the Value Area High (VAH), targeting reversion to the Point of Control (POC).
+**Majority vote** decides CONFIRM or REJECT. Every signal gets:
+- `🤖 AI Council: CONFIRMED/REJECTED (X%) — N confirm / M reject (E errors)`
+- Per‑model breakdown in dry‑run mode with verdict, confidence, and latency
 
-2. **Strategy 2: The Alpha Generator (OI & Funding Squeeze)**
-   - Tracks mathematical deviations in derivatives liquidity.
-   - Triggers "Short Squeeze" long setups when Open Interest spikes (>8% in 24h) and Funding Rates flip deeply negative, whilst price acts against the 20-EMA.
+### 📖 Reflection Memory
+Tracks **2,971 historical outcomes** per symbol from `kronos_outcomes.jsonl`:
+- Win rate, recent trend (improving/declining/stable)
+- Winner vs loser size ratio
+- **Confidence multiplier**: 0.5x–1.5x based on reliability
+- Injects lessons: *"BTCUSDT: 36% WR, losers larger than winners — tighten stops"*
 
-3. **Strategy 3: The Capital Scaler (Multi-Week Consolidation Breakout)**
-   - Monitors for extended horizontal volatility compression (e.g., 3+ weeks in a < 5% range).
-   - "Primes" the asset and triggers on the eventual breakout accompanied by a 1.5x volume surge.
+### 📰 Market Sentiment Pre‑Fetch
+Before the signal loop, Hermes pre‑fetches:
+- **CoinGecko** top crypto headlines
+- **StockTwits** per‑symbol sentiment
+- **Reddit r/CryptoCurrency** hot posts
 
-### 🤖 AI Verification & Conviction-Based Routing
+All injected into the AI Council prompt as market context.
 
-The strategy conviction score dictates position sizing and AI validation:
-- **Conviction 1 (0.60 Confidence)**: 0.5% risk. Standard trade. Routed through OpenRouter AI for macro confirmation before execution.
-- **Conviction 2 (0.75 Confidence)**: 1.0% risk. Double alignment. AI validation bypassed for speed and cost efficiency.
-- **Conviction 3 (0.90 Confidence)**: 1.5% risk. The "Liquidation Breakout" Meta-Signal. Maximum risk applied. AI validation bypassed.
+### 🧩 Strategy Stack (S0–S5)
+
+| Strategy | Trigger | Role |
+|----------|---------|------|
+| **S0: Momentum** | RSI + EMA20 + VWAP + Williams%R | Base conviction verification |
+| **S1: Volume Profile** | VAL/VAH mean reversion | Supporting |
+| **S2: OI Squeeze** | OI spike + funding divergence | Supporting |
+| **S3: Breakout** | Consolidation + vol surge | Supporting |
+| **S4: Funding Contrarian** | Extreme funding rates (+0.1% or -0.05%) | **Leading signal** |
+| **S5: BB Squeeze** | Bollinger Band compression breakout | Energy release |
+
+Conviction scoring: S0 base (1) +1 per agreeing sub‑strategy → Conviction 1–3.
 
 ### 🛡️ Multi‑Layer Risk Guards
 
 | Guard | Threshold | Action |
-|---|---|---|
-| **Circuit Breaker** | Balance < $5.00 | 🚨 Full halt, `os.Exit(1)` |
-| **Max Positions** | ≥ 5 open | ❄️ Freeze new entries |
-| **AI Gate** | All single-strategy signals verified | 🤖 Block illogical setups |
-| **Co‑Ranking** | Top 3 by 7D gain | 🏆 Prevent correlated over‑exposure |
+|-------|-----------|--------|
+| **Circuit Breaker** | Balance < $5.00 | 🚨 Full halt |
+| **Max Positions** | ≥ 5 open | ❄️ Entry freeze |
+| **AI Council** | Rejected by majority | 🧠 Block signal |
+| **Reflection** | < 35% win rate → 0.75x multiplier | 📉 Reduce confidence |
+| **7D Performance** | BUY with 7D loss > 10% → cap at 55% conf | 🔪 Block falling knives |
+| **7D Performance** | SELL with 7D loss > 15% → cap at 55% conf | 🐻 Block late sells |
+| **Exhaustion** | 7D gain > 40% / loss > 15% + ADX < 50 | 🛑 Block extended moves |
+| **Friction Gate** | ATR distance < 3× round‑trip fee | 💸 Block insufficient R:R |
+| **Risk Cap** | 7D > +15% or < -10% → cap at 65% confidence | ⚠️ Reduce variance |
+| **Co‑Ranking** | Top 3 by 7D gain/loss, strategy dedup | 🏆 Prevent correlation |
+| **Double‑Entry** | Existing position or open order on symbol | ⏸️ Skip |
+| **BTC Regime** | Bear→block Conv1-2 longs, Bull→block Conv1-2 shorts | 🟢🟡🔴 Macro filter |
 
 ### 🔥 Order Execution
-- **Isolated margin mode** (3x leverage cap)
-- **Bracket orders**: Market entry + SL (2× ATR) + TP (2.5× ATR → 1:2.5 R:R)
-- **Trailing stop**: EMA20 distance, activated at TP level
-- **Dynamic precision**: Price‑aware decimal formatting for all assets
+- Isolated margin (3x leverage cap)
+- Bracket orders: limit entry + SL (2× ATR) + TP (2.5× ATR)
+- Trailing stop: EMA20 distance, activated at midpoint to TP
+- Dynamic precision & minimum notional validation
+- Fee‑adjusted minimum R:R gate
 
-### 🔍 Diagnostic Mode
-```bash
-go run . --mode=scan --watchlist=top100
-```
-Runs full ingestion + multi-strategy evaluation across the top 100 volume leaders without AI verification or order execution — ideal for scanning the market daily.
+### 📋 Dashboard Outputs
+- **Live Execution Dashboard** — per‑symbol signals with conviction, ADX, strategy, AI Council verdict
+- **Market Conditions Analysis** — funding landscape, OI spikes, trending/ranging breakdown
+- **Volume Profile Report** — surge ratios, 7D gain ranking
+- **Top Longs / Shorts** — ranked by conviction × gain
+- **4‑Hour Macro Snapshot** — Telegram broadcast every 4h boundary
 
 ---
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                          CRONTAB (every 15min)                      │
-│    */15 * * * * cd /home/hermes/hermes-trading-bot/src && go run .  │
-└───────────────────────────┬─────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                   CRON (every 60min)                         │
+│   ~/.hermes/scripts/run-bot.sh --watchlist=top50 --scan     │
+└───────────────────────────┬─────────────────────────────────┘
                             │
-┌───────────────────────────▼─────────────────────────────────────────┐
-│  1. 🚀 Engine Initialisation                                       │
-│     ├── Load Bybit API credentials from environment                │
-│     ├── Fetch live wallet balance (private endpoint)               │
-│     └── Circuit breaker check (exit if < $5.00)                    │
-├─────────────────────────────────────────────────────────────────────┤
-│  2. 📊 Concurrent Data Ingestion                                   │
-│     ├── 4h/1d candles (limit=200) → ComputeAllIndicators()         │
-│     └── Public Endpoints → Fetch OI + Fetch Funding                │
-├─────────────────────────────────────────────────────────────────────┤
-│  3. 🧠 Meta-Strategy Evaluation                                    │
-│     ├── EvaluateS1MeanReversion(VP)                                │
-│     ├── EvaluateS2Squeeze(OI, Funding, Price, EMA20)               │
-│     ├── EvaluateS3Breakout(Consolidation, Volume)                  │
-│     └── Calculate Conviction (1, 2, or 3) & Assign Confidence      │
-├─────────────────────────────────────────────────────────────────────┤
-│  4. 🏆 Relative Strength Co‑Ranking                                │
-│     └── RankSignalsByGain(candidates, 3) → top 3 entries           │
-├─────────────────────────────────────────────────────────────────────┤
-│  5. 🤖 Execution Routing                                           │
-│     ├── If Conviction ≥ 2: Direct Execution (Bypass AI)            │
-│     └── If Conviction == 1: OpenRouter AI validation required      │
-├─────────────────────────────────────────────────────────────────────┤
-│  6. 🔥 Order Execution                                             │
-│     ├── Set isolated leverage (3x)                                 │
-│     ├── Compute position size (confidence‑based risk %)            │
-│     ├── Place market bracket order (entry, SL, TP)                 │
-│     └── Activate trailing stop (EMA20 distance, TP‑triggered)      │
-├─────────────────────────────────────────────────────────────────────┤
-│  7. 📋 Dashboard & Logging                                         │
-│     ├── Print Live Execution Dashboard (stdout)                    │
-│     └── Done → next cron tick in 15min                             │
-└─────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────▼─────────────────────────────────┐
+│  1. 🚀 Engine Initialisation                                │
+│      ├── Load .env → Bybit API + OpenRouter key            │
+│      ├── Fetch wallet balance ($95.04 USDT)                │
+│      └── Circuit breaker (< $5 → halt)                     │
+├─────────────────────────────────────────────────────────────┤
+│  2. 📊 Concurrent Data Ingestion (10 goroutines)           │
+│      ├── 4h/1d candles (200 limit) → all indicators        │
+│      ├── OI + Funding per symbol                           │
+│      └── Kronos AI predictions (batch cache)               │
+├─────────────────────────────────────────────────────────────┤
+│  3. 📰 Pre‑Fetch Market Sentiment                          │
+│      ├── CoinGecko headlines                               │
+│      ├── StockTwits per‑symbol sentiment                   │
+│      └── Reddit r/CryptoCurrency                           │
+├─────────────────────────────────────────────────────────────┤
+│  4. 📖 Compute Reflection Memory                           │
+│      └── 91 symbol profiles from 2,923 outcomes            │
+├─────────────────────────────────────────────────────────────┤
+│  5. 🧩 Evaluate Signals (S0–S5 + Conviction)              │
+│      ├── 6 strategies evaluated per asset                  │
+│      ├── Conviction 1-3 scoring                            │
+│      └── Reflection overlay → confidence multiplier        │
+├─────────────────────────────────────────────────────────────┤
+│  6. 🧠 AI Council (on non‑HOLD signals only)              │
+│      ├── 5 models vote via OpenRouter                      │
+│      ├── Majority decides CONFIRMED / REJECTED             │
+│      └── Sentiment context injected into prompt            │
+├─────────────────────────────────────────────────────────────┤
+│  7. 📋 Dashboard Display + Telegram Delivery               │
+│      ├── Signal table with AI verdicts                     │
+│      ├── Market conditions analysis                        │
+│      └── Volume / relative strength report                 │
+├─────────────────────────────────────────────────────────────┤
+│  8. 🔥 [Live mode only] Order Execution                   │
+│      ├── Position filter → rank → dedup → execute          │
+│      └── Bracket order + trailing stop                     │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -115,49 +151,55 @@ Runs full ingestion + multi-strategy evaluation across the top 100 volume leader
 ## 🛠️ Getting Started
 
 ### Prerequisites
-
-- **Go 1.22+** (for compilation)
-- **Bybit account** with API key (read + trade permissions)
-- **OpenRouter API key** (for AI verification of Conviction 1 trades)
-- **Git** (for version control)
+- **Go 1.22+**
+- **Bybit account** with API key (read + trade)
+- **OpenRouter API key** (for AI Council)
 
 ### Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/John4E656F/hermes-trading-bot.git
-cd hermes-trading-bot/src
-
-# Compile
-go build -o hermes-bot .
+cd hermes-trading-bot
+go build -o hermes-bot ./src/
 ```
 
-### Configuration
-
-Set these environment variables:
+### Configuration (`.env`)
 
 ```bash
-export BYBIT_API_KEY="your_bybit_api_key"
-export BYBIT_API_SECRET="your_bybit_api_secret"
-export OPENROUTER_API_KEY="your_openrouter_api_key"
+BYBIT_API_KEY=your_api_key
+BYBIT_API_SECRET=your_api_secret
+OPENROUTER_API_KEY=sk-or-v1-...
+COINGECKO_API_KEY=CG-...   # optional, improves sentiment
 ```
-
-Or add them to `~/.bashrc` / `~/.profile` for persistence.
 
 ### Usage
 
 ```bash
-# Normal mode — full pipeline with AI verification & execution
-go run .
+# Scan mode — full dashboard, AI Council verdicts, no orders
+./hermes-bot --mode=scan
 
-# Scan mode — diagnostic only, no AI verification, no trades, dynamic top 100 list
-go run . --mode=scan --watchlist=top100
+# Dry-run mode — per-model vote breakdown transparency
+./hermes-bot --mode=dry
 
-# Force signal mode — override all indicators for testing
-go run . --force-signal
+# Override watchlist size
+./hermes-bot --watchlist=top13 --mode=scan
+./hermes-bot --watchlist=top100 --mode=dry
 
-# Position dashboard — live account & open positions
-go run . --positions
+# Force signal override (diagnostic)
+./hermes-bot --force-signal
+```
+
+### Cron Setup
+
+```bash
+# Script lives at ~/.hermes/scripts/run-bot.sh
+# Runs every 60min, delivers to Telegram
+hermes cron create \
+  --schedule="every 60m" \
+  --script=run-bot.sh \
+  --no-agent \
+  --deliver=telegram \
+  --name=hermes-bot-1h
 ```
 
 ---
@@ -168,32 +210,67 @@ go run . --positions
 hermes-trading-bot/
 ├── README.md                # This file
 ├── go.mod                   # Go module definition
+├── .env                     # API credentials (gitignored)
+├── run-bot.sh               # Cron entrypoint script
+├── hermes-bot               # Compiled binary
+├── kronos_outcomes.jsonl    # Historical outcome data
+├── kronos_log.jsonl         # Kronos prediction log
+├── signal_log.jsonl         # Signal snapshot log
+├── trade_log.jsonl          # Executed trades log
 └── src/
-    ├── main.go              # Entry point: flags, ingestion loop, dashboard
-    ├── ai_client.go         # OpenRouter AI verification gateway
-    ├── allocator.go         # Meta-strategy allocator & conviction scoring
+    ├── main.go              # Entry point: flags, ingestion, dashboard
+    ├── allocator.go         # Meta-strategy allocator + conviction + guards
+    ├── ai_council.go        # 5-model AI Council voting via OpenRouter
+    ├── ai_client.go         # Legacy single-model AI client
+    ├── reflection.go        # Per-symbol win rate tracking + lesson builder
+    ├── news_fetcher.go      # Market sentiment pre-fetch (CoinGecko, StockTwits, Reddit)
+    ├── executor.go          # Bracket order execution + trailing stop + council gate
+    ├── client.go            # Bybit V5 REST client (HMAC auth)
+    ├── indicators.go        # Pure‑Go SMA, EMA, RSI, ATR, ADX, BBands, Williams%R
+    ├── market_analyzer.go   # Funding/OI landscape analysis
     ├── volume_profile.go    # S1: Volume Profile & Mean Reversion
-    ├── oi_funding.go        # S2: Open Interest, Funding Rates & Squeeze Setup
+    ├── oi_funding.go        # S2: Open Interest, Funding Rates
     ├── consolidation.go     # S3: Multi-Week Consolidation Breakout
-    ├── client.go            # Bybit V5 REST client (public + HMAC auth)
-    ├── executor.go          # Order execution: sizing, brackets, trailing stop
-    ├── indicators.go        # Pure‑Go SMA, EMA, RSI, ATR, ADX, Bollinger
-    ├── risk_guards.go       # Position guard, volume MA, 7D gain, ranking
+    ├── s6_kronos.go         # Kronos AI overlay client (optional)
+    ├── types.go             # Core domain types
+    ├── risk_guards.go       # Position guard, volume MA, 7D gain
     ├── tracker.go           # Trade journal & P&L tracking
-    └── types.go             # Core domain types (VP, OI, Consolidation, Signals)
+    ├── trade_log.go         # Trade log JSONL writer
+    ├── signal_log.go        # Signal snapshot JSONL writer
+    ├── kronos_log.go        # Kronos prediction log writer
+    ├── outcome_tracker.go   # 24h outcome resolution
+    ├── btc_filter.go        # BTC macro regime filter
+    ├── order_manager.go     # Stale limit order cancellation
+    ├── position_manager.go  # Breakeven stop management
+    ├── regime.go            # Market regime classifier
+    └── macd.go              # MACD indicator (reference)
 ```
 
 ---
 
 ## 🔮 Roadmap
 
-- [x] **Phase 1** — Data ingestion + local indicators + regime classification
-- [x] **Phase 2** — Strategy allocator + Bollinger Bands + ADX
-- [x] **Phase 3** — AI verification + live balance + authenticated execution
-- [x] **Phase 4** — Risk guards: volume filter, position cap, trailing stop, co‑ranking
-- [x] **Phase 5** — Three-Layer Meta-Strategy (Volume Profile, Open Interest, Consolidation)
-- [ ] **Phase 6** — Telegram alerts for trade fills / stops / drawdown
-- [ ] **Phase 7** — Multi‑exchange support (Binance, OKX)
+- [x] **Phase 1–4** — Ingestion, indicators, AI gate, risk guards
+- [x] **Phase 5** — Three-Layer Meta-Strategy (VP, OI, Consolidation)
+- [x] **Phase 6** — 5-Model AI Council + reflection memory + sentiment pre-fetch
+- [x] **Phase 7** — Strategy guards: 7D performance gate, exhaustion filter, risk cap
+- [x] **Phase 8** — Telegram delivery + 4H macro snapshot + cron automation
+- [ ] **Phase 9** — Backtest engine for strategy parameter optimization
+- [ ] **Phase 10** — Multi‑exchange support (Binance, OKX)
+
+---
+
+## 📊 Historical Performance
+
+| Metric | BUY | SELL | Total |
+|--------|-----|------|-------|
+| **Calls** | 682 | 2,289 | 2,971 |
+| **Win Rate** | 50.4% | 41.3% | 43.4% |
+| **Avg Win** | +6.58% | +3.89% | — |
+| **Avg Loss** | -8.59% | -3.95% | — |
+| **Total PnL** | -640.7% | +1,641.5% | **+1,000.8%** |
+
+SELL signals are strongly profitable despite lower WR. BUY signals lose money despite 50% WR — **the 5‑model AI Council + 7D performance guards directly target this weakness.**
 
 ---
 
