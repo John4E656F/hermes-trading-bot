@@ -5,3 +5,7 @@ __pycache__/
 *.swp
 hermes-bot
 botedition
+cache/
+analysis/__pycache__/
+analysis/*_run.log
+equity_state.json

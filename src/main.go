@@ -86,39 +86,30 @@ func main() {
 	fmt.Printf("│ 💰 Bybit USDT Balance: $%.2f USDT\n", liveBalance)
 	fmt.Println("└─────────────────────────────────────────────────────────────────┘")
 
-	// ── Emergency Circuit Breaker: %-based drawdown ──
-	// Track peak equity across runs via peak_equity.txt
+	// ── Peak-relative drawdown ladder ──
+	// Track peak equity across runs via peak_equity.txt. Every cron invocation
+	// is a fresh process, so the high-water mark has to live on disk.
 	peakEquity := readPeakEquity()
 	if liveBalance > peakEquity {
 		peakEquity = liveBalance
 		writePeakEquity(peakEquity)
 	}
 	ddPct := (peakEquity - liveBalance) / peakEquity * 100
-	freezeEntries := false
 	// Wire the drawdown ladder into the execution path — executor.go reads
 	// this global when sizing each new position.
 	globalDrawdownMultiplier = drawdownRiskMultiplier(ddPct)
 
-	if !scanMode {
-		switch {
-		case ddPct >= 15.0:
-			fmt.Printf("🚨 [EMERGENCY HALT] Drawdown %.1f%% ≥ 15%% — Halting all strategy calculations and freezing order routing!\n", ddPct)
-			os.Exit(1)
-		case ddPct >= 10.0:
-			fmt.Printf("🔴 CRITICAL DRAWDOWN: %.1f%% ≥ 10%% — Only Conv3 signals, risk capped at 50%%.\n", ddPct)
-		case ddPct >= 7.0:
-			fmt.Printf("🟠 MODERATE DRAWDOWN: %.1f%% ≥ 7%% — Reducing risk by 50%%, Conv2+ required.\n", ddPct)
-		case ddPct >= 4.0:
-			fmt.Printf("🟡 MILD DRAWDOWN: %.1f%% ≥ 4%% — Reducing risk by 25%%.\n", ddPct)
-		default:
-			fmt.Printf("🟢 NORMAL: No drawdown concern (%.1f%% < 4%%).\n", ddPct)
-		}
+	// ── Emergency Circuit Breaker (absolute floor, secondary net) ──
+	if !scanMode && liveBalance < 5.00 {
+		fmt.Printf("🚨 [EMERGENCY HALT] Available account capital is dangerously low ($%.2f USDT). Halting all strategy calculations and freezing order routing!\n", liveBalance)
+		os.Exit(1)
 	}
-	if scanMode {
-		if peakEquity > 0 {
-			fmt.Printf("💰 Peak equity: $%.2f | Current: $%.2f | Drawdown: %.1f%%\n", peakEquity, liveBalance, ddPct)
-		}
+	if scanMode && liveBalance < 5.00 {
+		fmt.Printf("⚠️ [SCAN] Available balance is low ($%.2f USDT). Scan proceeds — no orders will be placed.\n", liveBalance)
 	}
+
+	freezeEntries := false
+
 
 	// ── Build watchlist ──
 	var watchlist []string
@@ -154,7 +145,9 @@ func main() {
 				fmt.Printf("   └─ %s %s (open — new entries on this symbol blocked)\n", sym, side)
 			}
 		}
-		freezeEntries = openPosCount >= 5
+		// OR, never assignment: a drawdown-tier freeze must survive a low
+		// position count. Plain assignment here would clear it.
+		freezeEntries = freezeEntries || openPosCount >= 5
 		if freezeEntries {
 			fmt.Println("❄️ ENTRY FREEZE: Max concurrent exposure reached. All entry signals will be held.")
 		}
@@ -264,8 +257,30 @@ func main() {
 	marketAnalysis := AnalyzeMarket(marketData, watchlist)
 	PrintMarketAnalysis(marketAnalysis, len(watchlist))
 
-	// Reset portfolio risk counter for this cycle
-	globalPortfolioRiskPct = 0.0
+	// ── Seed the portfolio risk counter from LIVE positions ───────────
+	// Not a reset to zero. Every cron invocation is a fresh process, so a
+	// zeroed counter is blind to every position still open from earlier
+	// cycles — the cap would then only bound risk stacked within this one
+	// run's signal loop, while real exposure kept climbing across runs.
+	//
+	// Fail closed: if live exposure cannot be verified, seed at the cap so
+	// every new entry is refused this cycle. Trading blind to open risk is
+	// strictly worse than skipping a cycle.
+	if livePct, err := LivePortfolioRiskPct(client, liveBalance); err != nil {
+		globalPortfolioRiskPct = MAX_PORTFOLIO_RISK
+		fmt.Printf("🚨 Cannot verify live portfolio risk (%v) — seeding at the %.0f%% cap; no new entries this cycle.\n",
+			err, MAX_PORTFOLIO_RISK*100)
+	} else {
+		globalPortfolioRiskPct = livePct
+		headroom := (MAX_PORTFOLIO_RISK - livePct) * 100
+		if livePct >= MAX_PORTFOLIO_RISK {
+			fmt.Printf("🚨 PORTFOLIO CAP ALREADY BREACHED: live open risk %.2f%% ≥ %.0f%% cap — no new entries this cycle.\n",
+				livePct*100, MAX_PORTFOLIO_RISK*100)
+		} else {
+			fmt.Printf("   ✅ Portfolio risk seeded from live positions: %.2f%% used, %.2f%% headroom to the %.0f%% cap\n",
+				livePct*100, headroom, MAX_PORTFOLIO_RISK*100)
+		}
+	}
 
 	printAndExecuteSignals(marketData, marketAnalysis, executor, forceSignalToggle, watchlist, freezeEntries, scanMode, dryRunMode, openPositionSymbols)
 
@@ -283,8 +298,12 @@ func main() {
 	if !scanMode {
 		PrintActivePositionsQueries(client)
 		PrintRecentClosedPnLSummary(client)
-		UpdateTradeOutcomes(client)
 	}
+
+	// Outcome recording is read-only bookkeeping and must run in EVERY mode.
+	// run-bot.sh invokes the bot with --mode=scan, so gating this on !scanMode
+	// meant the outcome tracker never ran in production at all.
+	UpdateTradeOutcomes(client)
 
 	// ── Resolve 24h-old Kronos predictions against current prices ──────
 	prices := make(map[string]float64, len(marketData.Assets))
@@ -518,7 +537,7 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 			fmt.Printf("   Latest Vol: %.0f  |  20-MA Vol: %.0f  |  Ratio: %.2fx\n", latestVol, avgVol, latestVol/avgVol)
 		}
 
-		topLongs := RankSignalsByGain(buyCandidates, 3)
+		topLongs := RankByRelativeStrength(buyCandidates, 3)
 		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println("  🏆 TOP LONGS (Ranked by 7D Gain)")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -530,7 +549,7 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 			fmt.Println("  (No BUY signals — market lacking strength leaders)")
 		}
 
-		topShorts := RankSignalsByLowestGain(sellCandidates, 3)
+		topShorts := RankByRelativeWeakness(sellCandidates, 3)
 		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println("  🐻 TOP SHORTS (Ranked by Weakest 7D Performance)")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -674,7 +693,12 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 
 		// ── Strategy Deduplication ────────────────────────────────────
 		// Only take the strongest signal per strategy type per cycle.
-		// Prevents correlated entries (e.g. two S4 BUY signals simultaneously).
+		//
+		// This limits how many entries share one STRATEGY, not how much
+		// correlated market exposure is taken on. One S4 BUY and one Trend BUY
+		// on two assets that move together are two different strategy labels
+		// and one directional bet. Correlation is bounded by the portfolio
+		// open-risk cap in executor.go, not here.
 		// The list is already sorted by conviction→|gain|, so first seen = best.
 		seenStrategy := make(map[string]bool)
 		var deduped []RankedSignal
@@ -825,18 +849,37 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 			if !ok {
 				outcome.SkipReason = "ranked outside top 3 (lower conviction/gain)"
 			}
-			AppendSignalSnapshot(SignalSnapshotEntry{
-				Timestamp:  time.Now().UTC(),
-				Symbol:     c.Asset.Symbol,
-				Price:      c.Asset.CurrentPrice,
-				Action:     c.Signal.Action,
-				Strategy:   c.Signal.Strategy,
-				Conviction: c.Signal.Conviction,
-				Confidence: c.Signal.Confidence,
-				Gain7D:     c.Gain7D,
-				Executed:   outcome.Executed,
-				SkipReason: outcome.SkipReason,
-			})
+			active, s1a, s2a, s3a, s4a, s5a := subStrategyLens(c.Signal)
+			snap := SignalSnapshotEntry{
+				Timestamp:        time.Now().UTC(),
+				Symbol:           c.Asset.Symbol,
+				Price:            c.Asset.CurrentPrice,
+				Action:           c.Signal.Action,
+				Strategy:         c.Signal.Strategy,
+				Conviction:       c.Signal.Conviction,
+				Confidence:       c.Signal.Confidence,
+				Gain7D:           c.Gain7D,
+				Executed:         outcome.Executed,
+				SkipReason:       outcome.SkipReason,
+				ActiveStrategies: active,
+				S1Action:         s1a,
+				S2Action:         s2a,
+				S3Action:         s3a,
+				S4Action:         s4a,
+				S5Action:         s5a,
+				Regime:           c.Signal.Regime.String(),
+			}
+			// Kronos and the Council are recorded on every evaluated signal,
+			// gated or not — a layer can only be measured against the trades
+			// it rejected if its call on those trades was written down.
+			if c.Signal.Kronos != nil {
+				snap.KronosDirection = c.Signal.Kronos.Direction
+				snap.KronosConfidence = c.Signal.Kronos.Confidence
+			}
+			if c.Signal.AICouncilResult != nil {
+				snap.CouncilVerdict = c.Signal.AICouncilResult.FinalVerdict
+			}
+			AppendSignalSnapshot(snap)
 		}
 	}
 	fmt.Println("=========================================================================================")
@@ -967,7 +1010,7 @@ func sendTelegramSnapshot(client *BybitClient, data MarketData, watchlist []stri
 		})
 	}
 
-	top3 := RankSignalsByGain(candidates, 3)
+	top3 := RankByRelativeStrength(candidates, 3)
 	var top3Str []string
 	for i, c := range top3 {
 		top3Str = append(top3Str, fmt.Sprintf("#%d %s (%+.2f%%)", i+1, c.Asset.Symbol, c.Gain7D))

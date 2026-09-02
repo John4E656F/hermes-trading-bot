@@ -16,7 +16,12 @@ var globalDrawdownMultiplier float64 = 1.0
 
 // globalPortfolioRiskPct tracks the sum of risk across all open positions.
 // Each new trade checks that adding itself doesn't exceed MAX_PORTFOLIO_RISK.
-// Reset to 0 at the start of each cycle, incremented per executed trade.
+//
+// SEEDED, NOT RESET. main() sets this from LivePortfolioRiskPct (see
+// risk_guards.go) before any signal is evaluated, then each executed trade
+// adds its own risk. It used to be reset to 0.0 each cycle, which — because
+// every cron invocation is a fresh process — made the cap blind to positions
+// still open from previous cycles.
 var globalPortfolioRiskPct float64 = 0.0
 const MAX_PORTFOLIO_RISK = 0.04 // 4% total portfolio max stop-out risk
 
@@ -121,6 +126,29 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 		Strategy:    sig.Strategy,
 		Reason:      sig.Reason,
 		WalletBal:   e.TotalCapital,
+		Regime:      sig.Regime.String(),
+	}
+	for _, sub := range []struct {
+		name   string
+		active bool
+		action SignalAction
+	}{
+		{"S1", sig.S1.Active, sig.S1.Action},
+		{"S2", sig.S2.Active, sig.S2.Action},
+		{"S3", sig.S3.Active, sig.S3.Action},
+		{"S4", sig.S4.Active, sig.S4.Action},
+		{"S5", sig.S5.Active, sig.S5.Action},
+	} {
+		if sub.active && sub.action == action {
+			entry.ConfirmingStrategies = append(entry.ConfirmingStrategies, sub.name)
+		}
+	}
+	// Kronos is logged on every trade regardless of whether it gated this one.
+	// Counterfactual measurement of the overlay needs its call recorded even
+	// when the call was ignored.
+	if sig.Kronos != nil {
+		entry.KronosDirection = sig.Kronos.Direction
+		entry.KronosConfidence = sig.Kronos.Confidence
 	}
 
 	// ── AI Council Gate ────────────────────────────────────────────────
@@ -141,6 +169,9 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 	entry.AIVerdict = councilResult.FinalVerdict
 	entry.AIConfidence = councilResult.Confidence
 	entry.AIReason = councilResult.ConsensusSummary
+	for _, v := range councilResult.Votes {
+		entry.CouncilVotes = append(entry.CouncilVotes, fmt.Sprintf("%s:%s", v.Model, v.Verdict))
+	}
 	fmt.Printf("   🤖 AI Council: %s (%.0f%%) — %d confirm / %d reject (%d errors)\n",
 		councilResult.FinalVerdict, councilResult.Confidence*100,
 		councilResult.ConfirmCount, councilResult.RejectCount, councilResult.ErroredCount)
@@ -184,6 +215,7 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 		entry.RiskPct = riskPct
 		fmt.Printf("   📉 Drawdown multiplier: %.2fx (risk %.2f%% → %.2f%%)\n", ddMult, oldPct*100, riskPct*100)
 	}
+
 	entry.RiskPct = riskPct
 
 	// ── Portfolio-level risk cap ─────────────────────────────────────
@@ -355,6 +387,14 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 		maxFromCapital := (e.TotalCapital * 0.85) / price
 		if newQty := math.Min(orderValue*scaleFactor/price, maxFromCapital); newQty*price >= MIN_ORDER_USD {
 			qtyStr = strconv.FormatFloat(newQty, 'f', -1, 64)
+			// Keep positionSizeTokens in step with qtyStr. The SIZE GUARD below
+			// validates positionSizeTokens while the order submits qtyStr, so
+			// leaving this stale meant the guard checked the PRE-scale-up size
+			// and the exchange received the larger one — exactly the case the
+			// guard exists to catch. This matters most at deep drawdown on a
+			// small account, where the risk multiplier shrinks the order below
+			// the minimum notional and this branch scales it back up.
+			positionSizeTokens = newQty
 		} else {
 			entry.Executed = false
 			entry.SkipReason = fmt.Sprintf("order value $%.2f below minimum and wallet too small", orderValue)
@@ -370,9 +410,9 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 		targetRisk := e.TotalCapital * riskPct
 		if actualRisk > targetRisk*2.0 {
 			entry.Executed = false
-			entry.SkipReason = fmt.Sprintf("SIZE GUARD: actual SL risk $%.2f > 1.5× target $%.2f", actualRisk, targetRisk)
+			entry.SkipReason = fmt.Sprintf("SIZE GUARD: actual SL risk $%.2f > 2.0× target $%.2f", actualRisk, targetRisk)
 			AppendTradeLog(entry)
-			return fmt.Errorf("SIZE GUARD: actual SL risk $%.2f > 1.5× target $%.2f", actualRisk, targetRisk)
+			return fmt.Errorf("SIZE GUARD: actual SL risk $%.2f > 2.0× target $%.2f", actualRisk, targetRisk)
 		}
 	}
 

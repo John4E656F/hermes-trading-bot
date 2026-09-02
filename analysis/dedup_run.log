@@ -1,0 +1,81 @@
+EPISODE DEDUPLICATION -- every strategy lens
+Horizon: 24h   Episode key: (symbol, direction, resolution time)   Representative: first observation
+
+A. kronos_outcomes.jsonl
+========================================================================================================
+Lens                                 raw n   raw acc   epi n   epi acc  inflation     delta
+--------------------------------------------------------------------------------------------------------
+Master blended action                 2971     43.4%    1112     44.5%      2.67x    +1.1pp
+Kronos (AI overlay)                    526     49.0%     351     44.4%      1.50x    -4.6pp
+--------------------------------------------------------------------------------------------------------
+
+B. signal_log.jsonl -- 840 raw rows, resolving against OKX 1H OHLCV
+    [1/62] 0GUSDT        3000 1H bars,    1 signals
+    [3/62] AAVEUSDT      3000 1H bars,    5 signals
+    [4/62] ADAUSDT       3000 1H bars,  156 signals
+    [5/62] AGLDUSDT      3000 1H bars,    4 signals
+    [6/62] ALLOUSDT      3000 1H bars,    4 signals
+    [7/62] APTUSDT       3000 1H bars,   27 signals
+    [8/62] AUCTIONUSDT   3000 1H bars,    6 signals
+    [9/62] AVAXUSDT      3000 1H bars,  141 signals
+    [10/62] BCHUSDT       3000 1H bars,    6 signals
+    [11/62] BNBUSDT       3000 1H bars,   19 signals
+    [12/62] BTCUSDT       3000 1H bars,   51 signals
+    [15/62] CLUSDT        3000 1H bars,    1 signals
+    [17/62] ENAUSDT       3000 1H bars,    7 signals
+    [18/62] ETHUSDT       3000 1H bars,   39 signals
+    [19/62] EWYUSDT       3000 1H bars,    1 signals
+    [20/62] FARTCOINUSDT  3000 1H bars,    2 signals
+    [23/62] HUSDT         3000 1H bars,    3 signals
+    [25/62] JUPUSDT       3000 1H bars,    1 signals
+    [26/62] KAITOUSDT     3000 1H bars,    1 signals
+    [27/62] KORUUSDT      1681 1H bars,    3 signals
+    [28/62] LABUSDT       3000 1H bars,    6 signals
+    [29/62] LINKUSDT      3000 1H bars,   15 signals
+    [30/62] LITUSDT       3000 1H bars,    1 signals
+    [31/62] LTCUSDT       3000 1H bars,    9 signals
+    [32/62] MRVLUSDT      2712 1H bars,    2 signals
+    [33/62] MSTRUSDT      3000 1H bars,    3 signals
+    [34/62] MUUSDT        3000 1H bars,    5 signals
+    [35/62] NEARUSDT      3000 1H bars,    4 signals
+    [38/62] OUSDT         1842 1H bars,    4 signals
+    [39/62] RENDERUSDT    3000 1H bars,  123 signals
+    [40/62] REUSDT        1848 1H bars,    1 signals
+    [41/62] SAMSUNGUSDT   2021 1H bars,    4 signals
+    [42/62] SKHYNIXUSDT   2021 1H bars,   10 signals
+    [43/62] SKHYUSDT      1290 1H bars,    1 signals
+    [44/62] SNDKUSDT      3000 1H bars,    3 signals
+    [45/62] SNXXUSDT      1198 1H bars,    2 signals
+    [46/62] SOLUSDT       3000 1H bars,   26 signals
+    [47/62] SOXLUSDT      2545 1H bars,    3 signals
+    [48/62] SPCXUSDT      2833 1H bars,    4 signals
+    [49/62] SPXUSDT       3000 1H bars,    1 signals
+    [50/62] STXUSDT       3000 1H bars,   10 signals
+    [51/62] SUIUSDT       3000 1H bars,   13 signals
+    [54/62] TRUMPUSDT     3000 1H bars,    2 signals
+    [55/62] TRXUSDT       3000 1H bars,    4 signals
+    [56/62] UNIUSDT       3000 1H bars,    1 signals
+    [58/62] VVVUSDT       1468 1H bars,    2 signals
+    [59/62] WIFUSDT       3000 1H bars,    1 signals
+    [61/62] XRPUSDT       3000 1H bars,   22 signals
+    [62/62] ZECUSDT       3000 1H bars,    2 signals
+
+    resolved: 762   dropped (window not closed / no data): 0   not listed on OKX: 13
+    excluded symbols: 1000TOSHIUSDT, BTRUSDT, BTWUSDT, DEXEUSDT, GWEIUSDT, HNTUSDT, IPUSDT, NIULAIUSDT, ONGUSDT, TMXUSDT, TONUSDT, VELVETUSDT, XMRUSDT
+
+B. signal_log.jsonl strategy lenses
+========================================================================================================
+Lens                                 raw n   raw acc   epi n   epi acc  inflation     delta
+--------------------------------------------------------------------------------------------------------
+ALL SIGNALS (blended)                  762     39.6%     762     39.6%      1.00x    +0.0pp
+Trend Sell                             435     31.5%     435     31.5%      1.00x    +0.0pp
+S5 BB Squeeze                          107     56.1%     107     56.1%      1.00x    +0.0pp
+Strict Sell                             76     48.7%      76     48.7%      1.00x    +0.0pp
+S4 Funding Contrarian                   59     54.2%      59     54.2%      1.00x    +0.0pp
+Strict Buy                              41     46.3%      41     46.3%      1.00x    +0.0pp
+Trend Buy                               34     47.1%      34     47.1%      1.00x    +0.0pp
+Overbought Sell                          9     11.1%       9     11.1%      1.00x    +0.0pp
+Oversold Buy                             1      0.0%       1      0.0%      1.00x    +0.0pp
+--------------------------------------------------------------------------------------------------------
+
+Wrote /home/user/hermes-trading-bot/analysis/episode_dedup_results.json

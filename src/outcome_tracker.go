@@ -3,29 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"strconv"
-	"time"
 )
 
-// TradeOutcome is appended to trade_log.jsonl after a position closes.
-// Keyed by symbol + entry_timestamp so it can be joined with TradeLogEntry.
-type TradeOutcome struct {
-	Type           string    `json:"type"`            // always "outcome"
-	Symbol         string    `json:"symbol"`
-	EntryTimestamp time.Time `json:"entry_timestamp"` // matches TradeLogEntry.Timestamp
-	ExitTimestamp  time.Time `json:"exit_timestamp"`
-	EntryPrice     float64   `json:"entry_price"`
-	ExitPrice      float64   `json:"exit_price"`
-	ClosedPnL      float64   `json:"closed_pnl"`
-	ClosedPnLPct   float64   `json:"closed_pnl_pct"` // relative to entry notional
-	Outcome        string    `json:"outcome"`         // "TP_HIT" | "SL_HIT" | "TRAIL_STOP" | "MANUAL" | "UNKNOWN"
-	HoldHours      float64   `json:"hold_hours"`
-}
-
 // UpdateTradeOutcomes fetches recently closed positions from Bybit and appends
-// outcome records to trade_log.jsonl. Run at the end of each cycle so every
-// closed trade gets annotated with its actual PnL result.
+// one normalized OutcomeRecord per COMPLETED trade to outcome_log.jsonl.
+//
+// outcome_log.jsonl is the statistics source of record. trade_log.jsonl stays
+// an append-only audit trail of every decision (including rejections and
+// skips); it is not a trade list and must not be counted as one.
 func UpdateTradeOutcomes(client *BybitClient) {
 	respBytes, err := client.GetPrivateRequest(
 		"/v5/position/closed-pnl?category=linear&limit=50",
@@ -39,102 +24,56 @@ func UpdateTradeOutcomes(client *BybitClient) {
 		RetCode int    `json:"retCode"`
 		RetMsg  string `json:"retMsg"`
 		Result  struct {
-			List []struct {
-				Symbol         string `json:"symbol"`
-				OrderType      string `json:"orderType"`
-				ClosedSize     string `json:"closedSize"`
-				AvgEntryPrice  string `json:"avgEntryPrice"`
-				AvgExitPrice   string `json:"avgExitPrice"`
-				ClosedPnl      string `json:"closedPnl"`
-				CreatedTime    string `json:"createdTime"`
-				UpdatedTime    string `json:"updatedTime"`
-				ExecType       string `json:"execType"` // "Trade", "BustTrade", etc.
-			} `json:"list"`
+			List []closedPnLItem `json:"list"`
 		} `json:"result"`
 	}
 
-	if err := json.Unmarshal(respBytes, &resp); err != nil || resp.RetCode != 0 {
+	if err := json.Unmarshal(respBytes, &resp); err != nil {
+		fmt.Printf("⚠️ Outcome tracker: parse failed: %v\n", err)
 		return
 	}
-
+	if resp.RetCode != 0 {
+		fmt.Printf("⚠️ Outcome tracker: bybit error [%d]: %s\n", resp.RetCode, resp.RetMsg)
+		return
+	}
 	if len(resp.Result.List) == 0 {
+		fmt.Println("   📊 Outcome tracker: no closed positions returned.")
 		return
 	}
 
-	// Load existing trade_log.jsonl to find matching open entries.
-	// We only write an outcome record if we haven't already written one
-	// for this symbol+exitTime combination.
-	existing := loadExistingOutcomeKeys()
+	recorded := LoadRecordedTradeIDs()
+	entries := LoadTradeLogEntries()
 
-	var written int
+	written, skipped, incomplete := 0, 0, 0
 	for _, item := range resp.Result.List {
-		entryPrice, _ := strconv.ParseFloat(item.AvgEntryPrice, 64)
-		exitPrice, _ := strconv.ParseFloat(item.AvgExitPrice, 64)
-		closedPnL, _ := strconv.ParseFloat(item.ClosedPnl, 64)
-		closedSize, _ := strconv.ParseFloat(item.ClosedSize, 64)
-
-		exitTsMs, _ := strconv.ParseInt(item.UpdatedTime, 10, 64)
-		entryTsMs, _ := strconv.ParseInt(item.CreatedTime, 10, 64)
-
-		exitTime := time.UnixMilli(exitTsMs).UTC()
-		entryTime := time.UnixMilli(entryTsMs).UTC()
-
-		// Dedup key: symbol + exit timestamp
-		key := item.Symbol + "_" + item.UpdatedTime
-		if existing[key] {
+		rec := buildOutcomeRecord(client, item, entries)
+		if recorded[rec.TradeID] {
+			skipped++
 			continue
 		}
-
-		// Classify outcome
-		outcome := classifyOutcome(item.OrderType, item.ExecType, closedPnL)
-
-		// PnL as % of notional
-		pnlPct := 0.0
-		if entryPrice > 0 && closedSize > 0 {
-			notional := entryPrice * closedSize
-			if notional > 0 {
-				pnlPct = (closedPnL / notional) * 100.0
-			}
+		if err := AppendOutcomeRecord(rec); err != nil {
+			fmt.Printf("   ⚠️ Outcome write failed for %s: %v\n", rec.TradeID, err)
+			continue
 		}
-
-		holdHours := exitTime.Sub(entryTime).Hours()
-
-		record := TradeOutcome{
-			Type:           "outcome",
-			Symbol:         item.Symbol,
-			EntryTimestamp: entryTime,
-			ExitTimestamp:  exitTime,
-			EntryPrice:     entryPrice,
-			ExitPrice:      exitPrice,
-			ClosedPnL:      closedPnL,
-			ClosedPnLPct:   pnlPct,
-			Outcome:        outcome,
-			HoldHours:      holdHours,
-		}
-
-		AppendTradeLog(TradeLogEntry{
-			Timestamp:  record.ExitTimestamp,
-			Symbol:     record.Symbol,
-			SkipReason: fmt.Sprintf("OUTCOME:%s pnl=$%.4f (%.2f%%) hold=%.1fh entry=$%.4f exit=$%.4f",
-				outcome, closedPnL, pnlPct, holdHours, entryPrice, exitPrice),
-			Executed: outcome == "TP_HIT",
-		})
-
-		// Also write as a proper outcome JSON line for structured analysis
-		appendOutcomeRecord(record)
+		recorded[rec.TradeID] = true
 		written++
-
-		sign := "+"
-		if closedPnL < 0 {
-			sign = ""
+		if len(rec.Incomplete) > 0 {
+			incomplete++
 		}
-		fmt.Printf("   📊 OUTCOME [%s] %s: %s$%.4f (%.2f%%) — %s after %.1fh\n",
-			outcome, item.Symbol, sign, closedPnL, pnlPct, outcome, holdHours)
+
+		rStr := "n/a"
+		if rec.ResultR != nil {
+			rStr = fmt.Sprintf("%+.2fR", *rec.ResultR)
+		}
+		fmt.Printf("   📊 OUTCOME [%s] %s %s: net $%+.4f (%s) fees $%.4f — %s\n",
+			rec.ExitReason, rec.Side, rec.Symbol, rec.NetPnL, rStr, rec.Fees, rec.StrategyPrimary)
+		if len(rec.Incomplete) > 0 {
+			fmt.Printf("      ⚠️ incomplete fields: %v\n", rec.Incomplete)
+		}
 	}
 
-	if written > 0 {
-		fmt.Printf("   📝 %d outcome(s) recorded to trade log.\n", written)
-	}
+	fmt.Printf("   📝 Outcome tracker: %d written, %d already recorded, %d with incomplete fields → %s\n",
+		written, skipped, incomplete, outcomeLogPath)
 }
 
 func classifyOutcome(orderType, execType string, pnl float64) string {
@@ -155,40 +94,6 @@ func classifyOutcome(orderType, execType string, pnl float64) string {
 		return "LIQUIDATION"
 	}
 	return "UNKNOWN"
-}
-
-// appendOutcomeRecord writes a structured outcome record to outcome_log.jsonl.
-// This is separate from trade_log.jsonl so analysis scripts can load just outcomes.
-func appendOutcomeRecord(record TradeOutcome) {
-	const outcomePath = "../outcome_log.jsonl"
-	f, err := os.OpenFile(outcomePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	data, err := json.Marshal(record)
-	if err != nil {
-		return
-	}
-	f.Write(append(data, '\n'))
-}
-
-// loadExistingOutcomeKeys reads outcome_log.jsonl and returns a set of
-// symbol_timestamp keys already recorded (prevents duplicate outcome entries).
-func loadExistingOutcomeKeys() map[string]bool {
-	keys := make(map[string]bool)
-	data, err := os.ReadFile("../outcome_log.jsonl")
-	if err != nil {
-		return keys
-	}
-	for _, line := range splitLines(data) {
-		var rec TradeOutcome
-		if json.Unmarshal(line, &rec) == nil {
-			key := rec.Symbol + "_" + strconv.FormatInt(rec.ExitTimestamp.UnixMilli(), 10)
-			keys[key] = true
-		}
-	}
-	return keys
 }
 
 // splitLines splits a byte slice by newlines, skipping empty lines.

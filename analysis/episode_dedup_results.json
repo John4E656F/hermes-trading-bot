@@ -1,0 +1,224 @@
+{
+  "kronos": {
+    "Kronos (AI overlay)": {
+      "raw": {
+        "n_rows": 3106,
+        "graded": 526,
+        "correct": 258,
+        "wrong": 268,
+        "no_call": 2580,
+        "accuracy": 49.049429657794676
+      },
+      "dedup": {
+        "n_rows": 443,
+        "graded": 186,
+        "correct": 81,
+        "wrong": 105,
+        "no_call": 257,
+        "accuracy": 43.54838709677419
+      }
+    },
+    "Master blended action": {
+      "raw": {
+        "n_rows": 3106,
+        "graded": 2971,
+        "correct": 1289,
+        "wrong": 1682,
+        "no_call": 135,
+        "accuracy": 43.3860652978795
+      },
+      "dedup": {
+        "n_rows": 346,
+        "graded": 332,
+        "correct": 159,
+        "wrong": 173,
+        "no_call": 14,
+        "accuracy": 47.89156626506024
+      }
+    }
+  },
+  "signals": {
+    "S4 Funding Contrarian": {
+      "raw": {
+        "n_rows": 59,
+        "graded": 59,
+        "correct": 32,
+        "wrong": 27,
+        "no_call": 0,
+        "accuracy": 54.23728813559322
+      },
+      "dedup": {
+        "n_rows": 24,
+        "graded": 24,
+        "correct": 12,
+        "wrong": 12,
+        "no_call": 0,
+        "accuracy": 50.0
+      }
+    },
+    "Trend Sell": {
+      "raw": {
+        "n_rows": 435,
+        "graded": 435,
+        "correct": 137,
+        "wrong": 298,
+        "no_call": 0,
+        "accuracy": 31.494252873563216
+      },
+      "dedup": {
+        "n_rows": 39,
+        "graded": 39,
+        "correct": 14,
+        "wrong": 25,
+        "no_call": 0,
+        "accuracy": 35.8974358974359
+      }
+    },
+    "Strict Sell": {
+      "raw": {
+        "n_rows": 76,
+        "graded": 76,
+        "correct": 37,
+        "wrong": 39,
+        "no_call": 0,
+        "accuracy": 48.68421052631579
+      },
+      "dedup": {
+        "n_rows": 34,
+        "graded": 34,
+        "correct": 18,
+        "wrong": 16,
+        "no_call": 0,
+        "accuracy": 52.94117647058824
+      }
+    },
+    "S5 BB Squeeze": {
+      "raw": {
+        "n_rows": 107,
+        "graded": 107,
+        "correct": 60,
+        "wrong": 47,
+        "no_call": 0,
+        "accuracy": 56.074766355140184
+      },
+      "dedup": {
+        "n_rows": 63,
+        "graded": 63,
+        "correct": 34,
+        "wrong": 29,
+        "no_call": 0,
+        "accuracy": 53.96825396825397
+      }
+    },
+    "Strict Buy": {
+      "raw": {
+        "n_rows": 41,
+        "graded": 41,
+        "correct": 19,
+        "wrong": 22,
+        "no_call": 0,
+        "accuracy": 46.34146341463415
+      },
+      "dedup": {
+        "n_rows": 17,
+        "graded": 17,
+        "correct": 7,
+        "wrong": 10,
+        "no_call": 0,
+        "accuracy": 41.17647058823529
+      }
+    },
+    "Overbought Sell": {
+      "raw": {
+        "n_rows": 9,
+        "graded": 9,
+        "correct": 1,
+        "wrong": 8,
+        "no_call": 0,
+        "accuracy": 11.11111111111111
+      },
+      "dedup": {
+        "n_rows": 7,
+        "graded": 7,
+        "correct": 1,
+        "wrong": 6,
+        "no_call": 0,
+        "accuracy": 14.285714285714285
+      }
+    },
+    "Trend Buy": {
+      "raw": {
+        "n_rows": 34,
+        "graded": 34,
+        "correct": 16,
+        "wrong": 18,
+        "no_call": 0,
+        "accuracy": 47.05882352941176
+      },
+      "dedup": {
+        "n_rows": 8,
+        "graded": 8,
+        "correct": 3,
+        "wrong": 5,
+        "no_call": 0,
+        "accuracy": 37.5
+      }
+    },
+    "Oversold Buy": {
+      "raw": {
+        "n_rows": 1,
+        "graded": 1,
+        "correct": 0,
+        "wrong": 1,
+        "no_call": 0,
+        "accuracy": 0.0
+      },
+      "dedup": {
+        "n_rows": 1,
+        "graded": 1,
+        "correct": 0,
+        "wrong": 1,
+        "no_call": 0,
+        "accuracy": 0.0
+      }
+    },
+    "ALL SIGNALS (blended)": {
+      "raw": {
+        "n_rows": 762,
+        "graded": 762,
+        "correct": 302,
+        "wrong": 460,
+        "no_call": 0,
+        "accuracy": 39.63254593175853
+      },
+      "dedup": {
+        "n_rows": 171,
+        "graded": 171,
+        "correct": 78,
+        "wrong": 93,
+        "no_call": 0,
+        "accuracy": 45.614035087719294
+      }
+    }
+  },
+  "meta": {
+    "unresolved": 0,
+    "unlisted": [
+      "1000TOSHIUSDT",
+      "BTRUSDT",
+      "BTWUSDT",
+      "DEXEUSDT",
+      "GWEIUSDT",
+      "HNTUSDT",
+      "IPUSDT",
+      "NIULAIUSDT",
+      "ONGUSDT",
+      "TMXUSDT",
+      "TONUSDT",
+      "VELVETUSDT",
+      "XMRUSDT"
+    ],
+    "resolved": 762,
+    "raw_signal_rows": 840
+  }
+}

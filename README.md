@@ -69,7 +69,7 @@ Conviction scoring: S0 base (1) +1 per agreeing sub‑strategy → Conviction 1�
 
 | Guard | Threshold | Action |
 |-------|-----------|--------|
-| **Drawdown Ladder** | 4%→7%→10%→15% | 🟡 Reduce risk 25% → 🟠 50% → 🔴 Conv3 only → 🚨 Full halt |
+| **Drawdown Ladder** | 5%→8%→10%→12%→15% from peak equity | 🟡 Risk ×0.75 → 🟠 ×0.50 → 🔴 Conv3 only → 🚫 No new entries → 🚨 Hard halt (latches) |
 | **Max Positions** | ≥ 5 open | ❄️ Entry freeze |
 | **AI Council** | Rejected by majority | 🧠 Block signal |
 | **Reflection** | < 35% win rate → 0.75x multiplier | 📉 Reduce confidence |
@@ -78,7 +78,7 @@ Conviction scoring: S0 base (1) +1 per agreeing sub‑strategy → Conviction 1�
 | **Exhaustion** | 7D gain > 40% / loss > 15% + ADX < 50 | 🛑 Block extended moves |
 | **Friction Gate** | ATR distance < 3× round‑trip fee | 💸 Block insufficient R:R |
 | **Risk Cap** | 7D > +15% or < -10% → cap at 65% confidence | ⚠️ Reduce variance |
-| **Co‑Ranking** | Top 3 by 7D gain/loss, strategy dedup | 🏆 Prevent correlation |
+| **Relative‑Strength Ranking** | Top 3 by 7D gain/loss, strategy dedup | 📈 Prefer momentum leaders/laggards (no correlation protection) |
 | **Double‑Entry** | Existing position or open order on symbol | ⏸️ Skip |
 | **BTC Regime** | Bear→block Conv1-2 longs, Bull→block Conv1-2 shorts | 🟢🟡🔴 Macro filter |
 
@@ -87,7 +87,8 @@ Conviction scoring: S0 base (1) +1 per agreeing sub‑strategy → Conviction 1�
 - Bracket orders: limit entry + SL (2× ATR) + TP (2.5× ATR)
 - Trailing stop: EMA20 distance, activated at midpoint to TP
 - **Dynamic risk sizing**: 0.35% / 0.50% / 0.75% per trade (confidence-based)
-- **Max portfolio exposure**: 5 positions × 0.75% = 3.75% max stop-out risk
+- **Max portfolio exposure**: 3% total open risk, enforced from live positions
+  (`currentOpenRiskPct`) — a count limit alone does not bound risk
 - Dynamic precision & minimum notional validation
 - Fee‑adjusted minimum R:R gate
 
