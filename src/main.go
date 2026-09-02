@@ -90,6 +90,15 @@ func main() {
 	// Evaluated before anything else risk-related so a hard halt exits before
 	// the bot spends API calls scanning. Peak equity is persisted to
 	// equity_state.json and survives the 15-minute cron restarts.
+	//
+	// This supersedes the peak_equity.txt ladder from f73f959, which shared
+	// this design but was inert below the 15% halt: drawdownRiskMultiplier()
+	// was never called, no tier set freezeEntries, and the "Conv3 only" tier
+	// never changed minConviction — every band under 15% only printed a line.
+	// It also wrote the peak before the scan-mode check (so a scan-mode dummy
+	// balance could overwrite a real high-water mark), did not latch the halt,
+	// and tracked peak_equity.txt in git, which resets the peak on every fresh
+	// deploy. See equity_guard.go and equity_guard_test.go.
 	drawdownGuard = ApplyAbsoluteFloor(EvaluateDrawdownGuard(liveBalance, scanMode), liveBalance)
 	fmt.Printf("│ 📉 Drawdown guard [%s]: %s\n", drawdownGuard.Tier, drawdownGuard.Message)
 	if drawdownGuard.HardHalt && !scanMode {
@@ -110,6 +119,11 @@ func main() {
 		fmt.Printf("⚠️ [SCAN] Available balance is low ($%.2f USDT). Scan proceeds — no orders will be placed.\n", liveBalance)
 	}
 
+	// The drawdown guard freezes entries from its own tier as well as through
+	// minConviction, so the -12% band actually blocks rather than only printing.
+	freezeEntries := drawdownGuard.BlockNewEntries
+
+
 	// ── Build watchlist ──
 	var watchlist []string
 	if watchlistSize > 0 {
@@ -129,7 +143,6 @@ func main() {
 	globalKronosPredictions = make(map[string]KronosPrediction)
 
 	// ── Max Position Guard ──
-	freezeEntries := false
 	openPositionSymbols := make(map[string]string) // symbol → side for per-symbol guard
 	if !scanMode {
 		openPosCount, openSyms, err := fetchOpenPositions(client, watchlist)
@@ -145,7 +158,9 @@ func main() {
 				fmt.Printf("   └─ %s %s (open — new entries on this symbol blocked)\n", sym, side)
 			}
 		}
-		freezeEntries = openPosCount >= 5
+		// OR, never assignment: a drawdown-tier freeze must survive a low
+		// position count. Plain assignment here would clear it.
+		freezeEntries = freezeEntries || openPosCount >= 5
 		if freezeEntries {
 			fmt.Println("❄️ ENTRY FREEZE: Max concurrent exposure reached. All entry signals will be held.")
 		}
