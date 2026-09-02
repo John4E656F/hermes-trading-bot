@@ -124,6 +124,29 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 		Strategy:    sig.Strategy,
 		Reason:      sig.Reason,
 		WalletBal:   e.TotalCapital,
+		Regime:      sig.Regime.String(),
+	}
+	for _, sub := range []struct {
+		name   string
+		active bool
+		action SignalAction
+	}{
+		{"S1", sig.S1.Active, sig.S1.Action},
+		{"S2", sig.S2.Active, sig.S2.Action},
+		{"S3", sig.S3.Active, sig.S3.Action},
+		{"S4", sig.S4.Active, sig.S4.Action},
+		{"S5", sig.S5.Active, sig.S5.Action},
+	} {
+		if sub.active && sub.action == action {
+			entry.ConfirmingStrategies = append(entry.ConfirmingStrategies, sub.name)
+		}
+	}
+	// Kronos is logged on every trade regardless of whether it gated this one.
+	// Counterfactual measurement of the overlay needs its call recorded even
+	// when the call was ignored.
+	if sig.Kronos != nil {
+		entry.KronosDirection = sig.Kronos.Direction
+		entry.KronosConfidence = sig.Kronos.Confidence
 	}
 
 	// ── AI Council Gate ────────────────────────────────────────────────
@@ -144,6 +167,9 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 	entry.AIVerdict = councilResult.FinalVerdict
 	entry.AIConfidence = councilResult.Confidence
 	entry.AIReason = councilResult.ConsensusSummary
+	for _, v := range councilResult.Votes {
+		entry.CouncilVotes = append(entry.CouncilVotes, fmt.Sprintf("%s:%s", v.Model, v.Verdict))
+	}
 	fmt.Printf("   🤖 AI Council: %s (%.0f%%) — %d confirm / %d reject (%d errors)\n",
 		councilResult.FinalVerdict, councilResult.Confidence*100,
 		councilResult.ConfirmCount, councilResult.RejectCount, councilResult.ErroredCount)

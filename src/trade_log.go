@@ -36,9 +36,22 @@ type TradeLogEntry struct {
 	AIReason     string    `json:"ai_reason"`
 	Executed     bool      `json:"executed"`
 	SkipReason   string    `json:"skip_reason,omitempty"`
+
+	// ── Context required by outcome_log.jsonl (schema v2) ──
+	// These are recorded at entry so a completed trade can be attributed to
+	// its strategy, regime and AI verdicts after the fact. Without them the
+	// outcome record can only say a trade happened, not what produced it.
+	Regime               string   `json:"regime,omitempty"`
+	ConfirmingStrategies []string `json:"confirming_strategies,omitempty"`
+	CouncilVotes         []string `json:"council_votes,omitempty"`
+	KronosDirection      string   `json:"kronos_direction,omitempty"`
+	KronosConfidence     float64  `json:"kronos_confidence,omitempty"`
 }
 
-const tradeLogPath = "../trade_log.jsonl"
+// tradeLogPath is relative to the working directory, which run-bot.sh sets to
+// the repository root. It was previously "../trade_log.jsonl", writing every
+// entry one directory ABOVE the repo and outside version control.
+const tradeLogPath = "trade_log.jsonl"
 
 // AppendTradeLog writes one JSON line per trade to trade_log.jsonl.
 // Each line is a self-contained record — easy to grep, tail, or import to pandas.

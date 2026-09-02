@@ -1,0 +1,20 @@
+{"trade_id": "ANALYSIS-20260529", "source_file": "trade_history.json", "reason": "hand-written analysis note, not a trade", "raw_outcome": "REVIEW", "raw_side": "ANALYSIS"}
+{"trade_id": "T-20260528-003", "source_file": "trade_history.json", "reason": "order never resolved -- no exit, cannot compute PnL", "raw_outcome": "PENDING", "raw_side": "SHORT"}
+{"trade_id": "T-20260528-001", "source_file": "trade_history.json", "reason": "order never resolved -- no exit, cannot compute PnL", "raw_outcome": "PENDING", "raw_side": "LONG"}
+{"trade_id": "T-20260529-001", "source_file": "trade_history.json", "reason": "order never resolved -- no exit, cannot compute PnL", "raw_outcome": "PENDING", "raw_side": "SHORT"}
+{"trade_id": "T-20260529-002", "source_file": "trade_history.json", "reason": "order never resolved -- no exit, cannot compute PnL", "raw_outcome": "PENDING", "raw_side": "SHORT"}
+{"trade_id": "T-20260530-ADJ-001", "source_file": "trade_history.json", "reason": "order never resolved -- no exit, cannot compute PnL", "raw_outcome": "PENDING", "raw_side": "SHORT"}
+{"trade_id": "T-20260530-ADJ-002", "source_file": "trade_history.json", "reason": "order never resolved -- no exit, cannot compute PnL", "raw_outcome": "PENDING", "raw_side": "SHORT"}
+{"trade_id": "ANALYSIS-20260531", "source_file": "trade_history.json", "reason": "hand-written analysis note, not a trade", "raw_outcome": "SKIPPED", "raw_side": "ANALYSIS"}
+{"trade_id": "ANALYSIS-20260601", "source_file": "trade_history.json", "reason": "hand-written analysis note, not a trade", "raw_outcome": "SKIPPED", "raw_side": "ANALYSIS"}
+{"trade_id": "ANALYSIS-20260602", "source_file": "trade_history.json", "reason": "hand-written analysis note, not a trade", "raw_outcome": "SKIPPED", "raw_side": "ANALYSIS"}
+{"trade_id": "ANALYSIS-20260529", "source_file": "trade_journal.json", "reason": "hand-written analysis note, not a trade", "raw_outcome": "REVIEW", "raw_side": "ANALYSIS"}
+{"trade_id": "T-20260528-003", "source_file": "trade_journal.json", "reason": "order never resolved -- no exit, cannot compute PnL", "raw_outcome": "PENDING", "raw_side": "SHORT"}
+{"trade_id": "T-20260528-001", "source_file": "trade_journal.json", "reason": "order never resolved -- no exit, cannot compute PnL", "raw_outcome": "PENDING", "raw_side": "LONG"}
+{"trade_id": "T-20260529-001", "source_file": "trade_journal.json", "reason": "order never resolved -- no exit, cannot compute PnL", "raw_outcome": "PENDING", "raw_side": "SHORT"}
+{"trade_id": "T-20260529-002", "source_file": "trade_journal.json", "reason": "order never resolved -- no exit, cannot compute PnL", "raw_outcome": "PENDING", "raw_side": "SHORT"}
+{"trade_id": "T-20260530-ADJ-001", "source_file": "trade_journal.json", "reason": "order never resolved -- no exit, cannot compute PnL", "raw_outcome": "PENDING", "raw_side": "SHORT"}
+{"trade_id": "T-20260530-ADJ-002", "source_file": "trade_journal.json", "reason": "order never resolved -- no exit, cannot compute PnL", "raw_outcome": "PENDING", "raw_side": "SHORT"}
+{"trade_id": "NEARUSDT_2026-06-04T12:47:06Z", "source_file": "trade_log.jsonl", "reason": "order placed but no exit recorded -- position open or outcome never logged"}
+{"trade_id": "ICPUSDT_2026-06-04T18:09:52Z", "source_file": "trade_log.jsonl", "reason": "order placed but no exit recorded -- position open or outcome never logged"}
+{"trade_id": "ARKMUSDT_2026-06-04T18:09:52Z", "source_file": "trade_log.jsonl", "reason": "order placed but no exit recorded -- position open or outcome never logged"}

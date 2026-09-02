@@ -272,8 +272,12 @@ func main() {
 	if !scanMode {
 		PrintActivePositionsQueries(client)
 		PrintRecentClosedPnLSummary(client)
-		UpdateTradeOutcomes(client)
 	}
+
+	// Outcome recording is read-only bookkeeping and must run in EVERY mode.
+	// run-bot.sh invokes the bot with --mode=scan, so gating this on !scanMode
+	// meant the outcome tracker never ran in production at all.
+	UpdateTradeOutcomes(client)
 
 	// ── Resolve 24h-old Kronos predictions against current prices ──────
 	prices := make(map[string]float64, len(marketData.Assets))
