@@ -9,6 +9,17 @@ import (
 	"time"
 )
 
+// globalDrawdownMultiplier is set by main() after computing the current
+// drawdown %. Each new position in ExecuteBracketTrade is scaled by this
+// factor, making the drawdown ladder actually bite.
+var globalDrawdownMultiplier float64 = 1.0
+
+// globalPortfolioRiskPct tracks the sum of risk across all open positions.
+// Each new trade checks that adding itself doesn't exceed MAX_PORTFOLIO_RISK.
+// Reset to 0 at the start of each cycle, incremented per executed trade.
+var globalPortfolioRiskPct float64 = 0.0
+const MAX_PORTFOLIO_RISK = 0.04 // 4% total portfolio max stop-out risk
+
 const (
 	TAKER_FEE_RATE = 0.00055 // 0.055% per side on Bybit perpetuals
 	MIN_ORDER_USD  = 5.0     // Bybit minimum notional
@@ -145,13 +156,39 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 	var riskPct float64
 	switch {
 	case confidence >= 0.85:
-		riskPct = 0.0075 // 0.75% — META / high-conviction (was 2.5%)
+		riskPct = 0.0075 // 0.75% — META / high-conviction
 	case confidence >= 0.75:
-		riskPct = 0.0050 // 0.50% — CONFIRMED (was 2.0%)
+		riskPct = 0.0050 // 0.50% — CONFIRMED
 	default:
-		riskPct = 0.0035 // 0.35% — baseline Conv2/70% (was 1.5%)
+		riskPct = 0.0035 // 0.35% — baseline Conv2/70%
+	}
+	// Apply drawdown ladder: scales down risk when in drawdown.
+	// 0-4%: 1.0x, 4-7%: 0.75x, 7-10%: 0.50x, 10%+: 0.25x
+	ddMult := globalDrawdownMultiplier
+	if ddMult < 1.0 {
+		oldPct := riskPct
+		riskPct = riskPct * ddMult
+		entry.RiskPct = riskPct
+		fmt.Printf("   📉 Drawdown multiplier: %.2fx (risk %.2f%% → %.2f%%)\n", ddMult, oldPct*100, riskPct*100)
 	}
 	entry.RiskPct = riskPct
+
+	// ── Portfolio-level risk cap ─────────────────────────────────────
+	// Reject this trade if adding it would push total portfolio risk
+	// above MAX_PORTFOLIO_RISK (4%). This prevents correlated positions
+	// from silently exceeding safe exposure.
+	proposedRisk := e.TotalCapital * riskPct
+	existingRisk := globalPortfolioRiskPct * e.TotalCapital
+	totalRisk := existingRisk + proposedRisk
+	maxAllowed := e.TotalCapital * MAX_PORTFOLIO_RISK
+	if totalRisk > maxAllowed {
+		entry.Executed = false
+		entry.SkipReason = fmt.Sprintf("PORTFOLIO CAP: $%.2f existing + $%.2f proposed exceeds $%.2f max",
+			existingRisk, proposedRisk, maxAllowed)
+		AppendTradeLog(entry)
+		return fmt.Errorf("PORTFOLIO RISK CAP: $%.2f existing + $%.2f proposed > $%.2f max",
+			existingRisk, proposedRisk, maxAllowed)
+	}
 
 	// ── ADX-aware SL/TP multipliers ───────────────────────────────────
 	var slMult, tpMult float64
@@ -397,6 +434,10 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 	entry.RiskPct = riskPct
 	entry.Executed = true
 	AppendTradeLog(entry)
+
+	// Track portfolio-level risk: add this position's risk to the running total
+	globalPortfolioRiskPct += riskPct
+	fmt.Printf("   📊 Portfolio risk: %.2f%% / %.0f%% max\n", globalPortfolioRiskPct*100, MAX_PORTFOLIO_RISK*100)
 
 	fmt.Printf("✅ LIMIT ORDER PLACED: %s %s qty=%s limit=$%s | SL=$%s TP=$%s\n",
 		side, symbol, qtyStr, limitPriceStr, stopLossPrice, takeProfitPrice)

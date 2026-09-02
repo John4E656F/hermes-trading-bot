@@ -95,6 +95,9 @@ func main() {
 	}
 	ddPct := (peakEquity - liveBalance) / peakEquity * 100
 	freezeEntries := false
+	// Wire the drawdown ladder into the execution path — executor.go reads
+	// this global when sizing each new position.
+	globalDrawdownMultiplier = drawdownRiskMultiplier(ddPct)
 
 	if !scanMode {
 		switch {
@@ -260,6 +263,9 @@ func main() {
 	// ── Market Conditions Analysis ────────────────────────────────────
 	marketAnalysis := AnalyzeMarket(marketData, watchlist)
 	PrintMarketAnalysis(marketAnalysis, len(watchlist))
+
+	// Reset portfolio risk counter for this cycle
+	globalPortfolioRiskPct = 0.0
 
 	printAndExecuteSignals(marketData, marketAnalysis, executor, forceSignalToggle, watchlist, freezeEntries, scanMode, dryRunMode, openPositionSymbols)
 
