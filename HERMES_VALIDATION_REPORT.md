@@ -835,3 +835,124 @@ attribution, AI verdicts on trades whether gated or not, R-normalised results, M
 The risk controls from Steps 0 and 1 are appropriate to that posture: they are sized to
 survive a long losing run, which is what a system with no measured edge should be
 sized for.
+
+---
+
+## Addendum — Is it the entries or the exits?
+
+The blended configuration targets **2.5:1** reward:risk (SL 3×ATR, TP 7.5×ATR)
+and returns **−0.0360 R**. Two explanations fit that, and they call for opposite
+responses:
+
+- **The exits are giving back a real edge** — fix the exits, keep the signals.
+- **The entries are directionless** — no exit rule will help.
+
+`analysis/exit_efficiency.py` separates them from the trade dump the walk-forward
+backtest already wrote. It is the difference between "tune this" and "rebuild this",
+so it was worth answering before touching anything.
+
+### 1. Where each exit lands against that trade's own best excursion
+
+```
+$ python3 analysis/exit_efficiency.py
+
+exit reason        n  avg result R  avg MFE R  avg MAE R   MFE-result gap
+----------------------------------------------------------------------------
+SL_HIT           290        -1.045      0.421      1.312           +1.466
+TRAIL_STOP       195        +0.899      1.643      0.395           +0.745
+TP_HIT            42        +2.447      2.913      0.327           +0.465
+TIMEOUT           17        +0.316      0.950      0.627           +0.634
+----------------------------------------------------------------------------
+
+winners: n=241 (44.3%)  avg realised +1.189R  avg MFE 1.841R
+  winners that EVER reached the 2.5R take-profit level: 46/241
+  winners that reached even 2.0R at their best point:   75/241
+
+Ceiling — expectancy if EVERY trade exited at its own best point: +1.068R
+Actual expectancy: -0.036R
+```
+
+**The 2.5:1 design is fiction.** Only **46 of 241 winners** ever touched 2.5R, and
+only 42 trades in 544 exited at the target. The trailing stop harvests at +0.899 R
+against a 1.643 R best point — a real 0.745 R gap, but far too small to explain the
+result. Stops fire on trades whose best excursion averaged just **0.421 R**: those
+positions barely moved in favour before reversing.
+
+### 2. No take-profit level rescues it
+
+Sweeping every fixed target against the recorded excursions, stop held at 1 R
+(adverse-first ordering, the same conservative rule the backtest uses when a bar
+contains both levels):
+
+```
+ TP level  expectancy R  win rate  profit factor
+--------------------------------------------------
+    1.00R       -0.0876     45.6%           0.84
+    1.25R       +0.0044     45.0%           1.01
+    1.50R       -0.0184     43.9%           0.97
+    1.75R       -0.0170     43.9%           0.97
+    2.00R       -0.0102     43.8%           0.98
+    2.25R       -0.0140     43.8%           0.97
+    2.50R       -0.0115     43.8%           0.98   <- current design
+    3.00R       -0.0102     43.8%           0.98
+--------------------------------------------------
+best in sweep: TP 1.25R -> +0.0044R at PF 1.01
+```
+
+The **best** outcome across the entire sweep is **+0.0044 R at profit factor 1.01** —
+indistinguishable from zero, and it is the peak of a curve fitted *after* seeing the
+data. Treat it as an upper bound on what exit tuning could ever achieve here, not as
+a setting to adopt.
+
+### 3. Entry quality, stripped of every exit rule
+
+```
+median MFE 0.964R    median MAE 1.021R
+trades where MFE > MAE: 255/544 (46.9%)   <- 50% is a coin flip
+```
+
+**This is the finding that settles it.** Across 544 trades, price is *slightly more
+likely to move against the position first* than for it. The entries carry no
+directional information, so there is no edge for any exit rule to preserve.
+
+### What this rules out
+
+Each of these is a common explanation for a losing system, and the data clears all
+of them:
+
+| Suspect | Verdict |
+|---|---|
+| Fees and slippage | **Not the cause.** Gross expectancy is −0.0150 R — negative before any cost is applied. |
+| The exit rules | **Not the cause.** No take-profit level in the sweep reaches meaningful positive expectancy. |
+| Position sizing | **Not the cause.** Identical trades at tiered vs flat risk give identical R. Sizing moved the loss from −9.80% to −7.82%; it controls damage, never edge. |
+| The risk-infrastructure bugs fixed in this branch | **Real, and worth fixing** — they would have caused serious harm *if* the system made money. They do not create it. |
+
+### The one large effect that is not noise
+
+```
+RANGING   +0.1345 R  (n=120)
+TRENDING  −0.4555 R  (n=830)      RANGING − TRENDING = +0.59 R, Welch t = +5.18
+```
+
+The regime split moves expectancy by **0.59 R** and is the only large, statistically
+significant effect anywhere in this study — an order of magnitude beyond anything the
+AI stack contributes. The strategies bleed in ADX>25 trending markets and roughly
+break even elsewhere.
+
+Two caveats before acting on it: it is a filter identified *after* seeing the data,
+and ADX>25 is a crude regime proxy. It is a hypothesis to test prospectively, not a
+result.
+
+### Cheapest changes that follow from the measurements
+
+1. **S1 mean reversion** — the only statistically established result in the study
+   (−0.0672 R, n=3953, t=−3.39), it is negative, and it fires more than every other
+   lens combined.
+2. **The 5-model AI Council** — five model calls per non-HOLD signal, per cycle, for
+   a measured contribution to expectancy of zero on a sample too small to have
+   detected one. That is a real recurring cost against no measured benefit.
+3. **S3 consolidation breakout** — 3 trades in 2.7 years. Effectively dead code.
+
+None of these were changed in this branch: the sessions that produced it were scoped
+to measurement and risk infrastructure, and strategy changes were explicitly out of
+scope. They are recorded here as what the numbers imply, for a separate decision.
