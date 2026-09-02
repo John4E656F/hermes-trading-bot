@@ -86,7 +86,22 @@ func main() {
 	fmt.Printf("│ 💰 Bybit USDT Balance: $%.2f USDT\n", liveBalance)
 	fmt.Println("└─────────────────────────────────────────────────────────────────┘")
 
-	// ── Emergency Circuit Breaker ──
+	// ── Peak-relative drawdown guard ──
+	// Evaluated before anything else risk-related so a hard halt exits before
+	// the bot spends API calls scanning. Peak equity is persisted to
+	// equity_state.json and survives the 15-minute cron restarts.
+	drawdownGuard = ApplyAbsoluteFloor(EvaluateDrawdownGuard(liveBalance, scanMode), liveBalance)
+	fmt.Printf("│ 📉 Drawdown guard [%s]: %s\n", drawdownGuard.Tier, drawdownGuard.Message)
+	if drawdownGuard.HardHalt && !scanMode {
+		fmt.Println("🛑 [HARD HALT] Peak-relative drawdown limit breached. No orders will be placed.")
+		fmt.Println("   Review the account, then delete equity_state.json (or set \"halted\": false) to resume.")
+		os.Exit(1)
+	}
+	if drawdownGuard.HardHalt && scanMode {
+		fmt.Println("⚠️ [SCAN] Hard-halt tier active — a live run would exit here.")
+	}
+
+	// ── Emergency Circuit Breaker (absolute floor, secondary net) ──
 	if !scanMode && liveBalance < 5.00 {
 		fmt.Printf("🚨 [EMERGENCY HALT] Available account capital is dangerously low ($%.2f USDT). Halting all strategy calculations and freezing order routing!\n", liveBalance)
 		os.Exit(1)
@@ -138,6 +153,7 @@ func main() {
 
 	// Wire Execution Engine with the LIVE balance
 	executor := NewExecutionEngine(client, liveBalance)
+	executor.RiskMultiplier = drawdownGuard.RiskMultiplier
 
 	marketData := MarketData{
 		Assets:      make(map[string]*AssetSnapshot),
@@ -272,6 +288,10 @@ func main() {
 // totalEquity includes unrealized PnL and is what Bybit shows as the account value.
 // totalAvailableBalance (free margin) was wrong — it drops to ~$59 when $40 is
 // locked in open positions, making the bot think it has less capital than it does.
+// drawdownGuard holds this run's peak-relative drawdown decision. Set once in
+// main() before any sizing or entry decision is made.
+var drawdownGuard DrawdownAction
+
 func fetchLiveBalance(client *BybitClient) (float64, error) {
 	respBytes, err := client.GetPrivateRequest("/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT")
 	if err != nil {
@@ -662,25 +682,20 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 		}
 
 
-		// ── Tiered Capital Protection ─────────────────────────────────
-		// Replaces hardcoded $103 peak. Scales minimum conviction requirement
-		// with wallet size so the bot can still trade its way back on high-quality
-		// setups instead of being permanently frozen.
-		minConviction := 2
-		capitalBlocked := false
-		switch {
-		case data.LiveBalance < 20.0:
-			capitalBlocked = true
-			fmt.Printf("🚨 CIRCUIT BREAKER: $%.2f USDT — below $20 minimum. ALL entries halted.\n", data.LiveBalance)
-		case data.LiveBalance < 50.0:
-			minConviction = 3
-			fmt.Printf("🔴 CAPITAL PRESERVATION: $%.2f < $50 — only Conviction 3 (META) signals allowed.\n", data.LiveBalance)
-		case data.LiveBalance < 75.0:
+		// ── Peak-relative Capital Protection ──────────────────────────
+		// Drawdown from the persisted high-water mark drives both the minimum
+		// conviction and the position-risk multiplier. Absolute dollar
+		// thresholds sit underneath as a secondary net (ApplyAbsoluteFloor)
+		// rather than as the primary control: $75 means nothing without
+		// knowing whether the account peaked at $80 or at $800.
+		minConviction := drawdownGuard.MinConviction
+		if minConviction < 2 {
 			minConviction = 2
-			fmt.Printf("🟡 CAUTION MODE: $%.2f < $75 — Conviction 2+ required.\n", data.LiveBalance)
-		default:
-			fmt.Printf("🟢 NORMAL TRADING: $%.2f — all Conviction 2+ signals active.\n", data.LiveBalance)
 		}
+		capitalBlocked := drawdownGuard.BlockNewEntries
+		fmt.Printf("%s (equity $%.2f, peak $%.2f, risk ×%.2f, min conviction %d)\n",
+			drawdownGuard.Message, data.LiveBalance, drawdownGuard.PeakEquity,
+			drawdownGuard.RiskMultiplier, minConviction)
 
 		// ── Signal Snapshot Logging ────────────────────────────────────
 		// Record every non-HOLD candidate this cycle (executed or skipped, and
@@ -698,7 +713,8 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 				outcomes[c.Asset.Symbol] = struct {
 					Executed   bool
 					SkipReason string
-				}{false, fmt.Sprintf("circuit breaker: balance $%.2f below $20 minimum", data.LiveBalance)}
+				}{false, fmt.Sprintf("drawdown guard [%s]: %.2f%% below peak $%.2f",
+					drawdownGuard.Tier, drawdownGuard.DrawdownPct, drawdownGuard.PeakEquity)}
 			}
 		} else {
 			for _, c := range filtered {
