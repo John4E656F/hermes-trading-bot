@@ -8,5 +8,4 @@ botedition
 cache/
 analysis/__pycache__/
 analysis/*_run.log
-peak_equity.txt
 equity_state.json
