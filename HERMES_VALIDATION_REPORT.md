@@ -388,3 +388,74 @@ Two things were done about it:
    historical OHLCV — which is Step 4.
 
 ---
+
+## Step 6 — Co-ranking mislabeling
+
+### What it claimed
+
+`README.md`:
+
+```
+| **Co‑Ranking** | Top 3 by 7D gain/loss, strategy dedup | 🏆 Prevent correlation |
+```
+
+`src/risk_guards.go`:
+
+```go
+// ─── Feature 3: Relative Strength Co-ranking ────────────────────────────
+// RankedSignal pairs a validated signal with its trailing 7-day strength
+// so the co-ranking sort can put the strongest performers first.
+```
+
+`src/main.go`:
+
+```go
+// Only take the strongest signal per strategy type per cycle.
+// Prevents correlated entries (e.g. two S4 BUY signals simultaneously).
+```
+
+### What it does
+
+It sorts candidates by trailing 7-day price change and keeps the strongest (for
+BUYs) or weakest (for SELLs) three. That is a momentum / relative-strength filter.
+
+It does not merely fail to prevent correlated exposure — **it selects for it**.
+Assets that move together have *similar* 7-day gains, so ranking by 7-day gain and
+taking the top three preferentially picks names that already move as a group. In a
+market where the majors move together most of the time, "top 3 by 7D gain" is close
+to "three names with the same beta to the same move".
+
+The strategy-dedup step alongside it limits how many entries share a strategy
+**label**, which is also not correlation control: one `S4 Funding Contrarian` BUY
+and one `Trend Buy` on two assets that move together are two labels and one
+directional bet.
+
+### Changes
+
+| Before | After |
+|---|---|
+| `RankSignalsByGain` | `RankByRelativeStrength` |
+| `RankSignalsByLowestGain` | `RankByRelativeWeakness` |
+| `Feature 3: Relative Strength Co-ranking` | `Feature 3: Relative-Strength Ranking` |
+| README: `Co‑Ranking … 🏆 Prevent correlation` | `Relative‑Strength Ranking … 📈 Prefer momentum leaders/laggards (no correlation protection)` |
+
+The doc comment now states plainly what the function does and does not do, and the
+strategy-dedup comment no longer claims correlation protection.
+
+Real correlation-cluster logic was **not** built — out of scope for this pass, as
+specified. What bounds correlated exposure today is the 3% portfolio open-risk cap
+from Step 0, which limits total damage from a single correlated move regardless of
+how many names it is spread across. That is a blunt instrument, not a substitute
+for cluster logic, and it is worth building properly later.
+
+### Verification
+
+```
+$ grep -rn "RankSignalsByGain\|RankSignalsByLowestGain" src/*.go
+(no matches)
+
+$ go build -o /dev/null ./src/ && go vet ./src/ && go test ./src/
+ok  	hermes-bot/src	0.010s
+```
+
+---
