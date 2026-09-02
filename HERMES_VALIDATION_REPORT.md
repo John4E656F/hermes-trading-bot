@@ -278,3 +278,113 @@ Six trades is not a sample. No statistic computed on it means anything, and none
 computed on it below.
 
 ---
+
+## Step 3 — Episode deduplication, applied to every strategy lens
+
+### The mechanism
+
+Hermes runs on a short cron and re-evaluates the same open market situation on
+every pass, writing a fresh row each time. When those rows are later resolved
+against the same forward price, **one market event becomes N rows in the
+denominator**. That does not merely inflate the sample size — it inflates
+*confidence*, because N correlated observations are counted as N independent ones.
+
+### A wrong episode definition, and why it looked right
+
+The first definition keyed on `(symbol, direction, exact resolution timestamp)`.
+On `kronos_outcomes.jsonl` it works, because `resolved_at` is a shared batch
+timestamp (571 distinct values over 3,106 rows). On `signal_log.jsonl` it collapses
+**nothing**, because every row carries a nanosecond timestamp and therefore a unique
+resolution instant. It reported a tidy `1.00x` inflation on every lens — while this
+sat in the sample:
+
+```
+largest group ('ADAUSDT', 'SELL')  154 rows
+    2026-06-10T18:56:34 Trend Sell          0.1636
+    2026-06-10T19:58:24 Strict Sell         0.1609
+    2026-06-11T07:16:35 Trend Sell          0.1646
+    2026-06-11T13:29:01 Trend Sell          0.1646
+    2026-06-11T14:23:54 Trend Sell          0.1646
+    2026-06-11T16:26:36 QUALITY: Trend Sell 0.1652
+    ...
+```
+
+154 rows of one standing bearish call on one asset.
+
+**The definition used below:** an episode is a **maximal run of `(symbol, direction)`
+rows whose consecutive gaps are shorter than the outcome horizon** (24h). A
+24h-horizon call re-issued an hour later is not an independent observation — it
+resolves against overlapping price action and comes from the same market state. A
+new episode begins when the direction flips or the signal goes quiet for a full
+horizon. The representative kept is the **first** observation, the only one
+available in real time.
+
+### Results — raw vs episode-deduplicated, per lens
+
+```
+$ python3 analysis/episode_dedup.py
+
+A. kronos_outcomes.jsonl
+========================================================================================================
+Lens                                 raw n   raw acc   epi n   epi acc  inflation     delta
+--------------------------------------------------------------------------------------------------------
+Master blended action                 2971     43.4%     332     47.9%      8.95x    +4.5pp
+Kronos (AI overlay)                    526     49.0%     186     43.5%      2.83x    -5.5pp
+--------------------------------------------------------------------------------------------------------
+
+B. signal_log.jsonl — 840 raw rows, resolved against OKX 1H OHLCV
+    resolved: 762   dropped: 0   not listed on OKX: 13
+    excluded: 1000TOSHIUSDT, BTRUSDT, BTWUSDT, DEXEUSDT, GWEIUSDT, HNTUSDT, IPUSDT,
+              NIULAIUSDT, ONGUSDT, TMXUSDT, TONUSDT, VELVETUSDT, XMRUSDT
+========================================================================================================
+Lens                                 raw n   raw acc   epi n   epi acc  inflation     delta
+--------------------------------------------------------------------------------------------------------
+ALL SIGNALS (blended)                  762     39.6%     171     45.6%      4.46x    +6.0pp
+S5 BB Squeeze                          107     56.1%      63     54.0%      1.70x    -2.1pp
+Trend Sell                             435     31.5%      39     35.9%     11.15x    +4.4pp
+Strict Sell                             76     48.7%      34     52.9%      2.24x    +4.3pp
+S4 Funding Contrarian                   59     54.2%      24     50.0%      2.46x    -4.2pp
+Strict Buy                              41     46.3%      17     41.2%      2.41x    -5.2pp
+Trend Buy                               34     47.1%       8     37.5%      4.25x    -9.6pp
+Overbought Sell                          9     11.1%       7     14.3%      1.29x    +3.2pp
+Oversold Buy                             1      0.0%       1      0.0%      1.00x    +0.0pp
+--------------------------------------------------------------------------------------------------------
+```
+
+### What these numbers say
+
+- **Inflation is not uniform, so an aggregate figure hides it.** `Trend Sell` is
+  inflated **11.15×** (435 rows → 39 episodes); `S5 BB Squeeze` only **1.70×**. The
+  strategy that fires most often on a persistent condition is the one whose sample
+  size is most illusory — and `Trend Sell` is 435 of the 762 resolved rows, 57% of
+  the raw log.
+- **Deduplication moves accuracy in both directions.** It is not a uniform haircut.
+  Kronos drops from 49.0% to **43.5%**; the master action rises from 43.4% to 47.9%.
+  Whichever direction it moves, the honest denominator is the smaller one.
+- **Every episode-deduplicated lens sits near or below a coin flip.** The best is
+  `S5 BB Squeeze` at 54.0% over 63 episodes; the worst meaningful one is
+  `Trend Sell` at 35.9% over 39.
+- **`n` is small.** After deduplication the entire signal history is **171 independent
+  episodes**, and no single lens exceeds 63. At n=63, a 54.0% hit rate has a 95%
+  confidence interval of roughly 41%–66% — it does not distinguish itself from chance.
+
+### S1/S2/S3 could not be measured from `signal_log.jsonl` at all
+
+This is not a logging gap; it is the design. From `src/allocator.go:56`:
+
+```go
+//	S1/S2/S3 → supporting, never generate alone
+```
+
+S1/S2/S3 never produce a master strategy label, so they never appear in the log's
+`strategy` field, and no amount of deduplication recovers an accuracy for them.
+The lens table above is complete for what was recorded.
+
+Two things were done about it:
+1. `SignalSnapshotEntry` now records `s1_action`…`s5_action`, `active_strategies`,
+   `kronos_direction`, `council_verdict` and `regime` on every evaluated signal, so
+   each lens is measurable **going forward**.
+2. Their historical behaviour is measured by replaying them independently against
+   historical OHLCV — which is Step 4.
+
+---
