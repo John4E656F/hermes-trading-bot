@@ -459,3 +459,178 @@ ok  	hermes-bot/src	0.010s
 ```
 
 ---
+
+## Step 4 — Walk-forward backtest
+
+### Method
+
+- **Universe:** the 62 symbols the bot actually evaluated, taken from `signal_log.jsonl`.
+  49 are listed on OKX; **13 are not** and are excluded rather than silently dropped:
+  `1000TOSHIUSDT, BTRUSDT, BTWUSDT, DEXEUSDT, GWEIUSDT, HNTUSDT, IPUSDT, NIULAIUSDT,
+  ONGUSDT, TMXUSDT, TONUSDT, VELVETUSDT, XMRUSDT`.
+- **Span:** 2023-12-07 → 2026-09-02 (**2.7 years**), 4H bars with daily context.
+- **Walk-forward:** every value at bar *i* is computed from bars `0..i` only. No
+  parameter is fitted in the backtest — the strategy parameters are read from the
+  shipped code — so the entire history is a single out-of-sample window.
+- **Costs:** `TAKER_FEE_RATE` (0.055%) per side, funding at every 8h settlement inside
+  the hold window signed by side, 5bps slippage per side (the bot's own fee gate
+  assumes 10bps round-trip, so this is its working assumption).
+- **Conservative fills:** a bar whose range contains **both** the stop and the target
+  resolves as the **stop**. Intrabar sequence is unknowable from OHLCV, and the
+  optimistic assumption is how backtests manufacture edges that do not survive a live
+  book. Entries fill at the signal bar's close; the live bot places a *limit* order
+  that may never fill, so this is **generous** to the strategy.
+- **Episode-deduplicated** per Step 3: one trade per `(symbol, side, entry bar)`.
+
+Everything is verified rather than assumed — see "Correctness of the toolchain" below.
+
+### Results
+
+```
+$ python3 analysis/run_backtest.py
+
+Loaded 49 symbols in 1252s; 13 not available on OKX
+History span: 2023-12-07 -> 2026-09-02
+
+============================================================================================================================================
+WALK-FORWARD RESULTS — episode-deduplicated, net of fees, funding and slippage
+============================================================================================================================================
+Configuration                  n   net ret    maxDD     win  avgW R  avgL R     exp R     PF  Sharpe Sortino    longR   shortR
+--------------------------------------------------------------------------------------------------------------------------------------------
+S1 mean reversion           3953  -132.82%  144.49%   40.2%    1.29   -0.98  -0.0672   0.89   -2.06   -3.31   -0.033   -0.098
+S2 OI/funding squeeze         71     5.31%    2.57%   43.7%    1.42   -0.84  +0.1495   1.32    1.99    3.81   +0.114   +0.212
+S3 consolidation breakout      3    -0.23%    0.61%   66.7%    0.38   -1.21  -0.1542   0.62   -0.53   -0.57   -0.154      n/a
+BLENDED (flat 0.50% risk)    544    -9.80%   30.58%   44.3%    1.19   -1.01  -0.0360   0.94   -0.43   -0.67   -0.117   -0.006
+BLENDED (tiered sizing)      544    -7.82%   25.78%   44.3%    1.19   -1.01  -0.0360   0.94   -0.43   -0.67   -0.117   -0.006
+--------------------------------------------------------------------------------------------------------------------------------------------
+
+COST DECOMPOSITION (why gross and net differ)
+Configuration               gross exp R   net exp R     fees $   funding $  slippage $  avg MAE R  avg MFE R
+------------------------------------------------------------------------------------------------------------
+S1 mean reversion               -0.0498     -0.0672    3252.55      186.58     2956.86       0.96       1.10
+S2 OI/funding squeeze           +0.0670     +0.1495      53.69     -346.84       48.81       0.81       1.16
+S3 consolidation breakout       -0.0715     -0.1542      10.53        1.89        9.57       0.86       1.58
+BLENDED (flat 0.50% risk)       -0.0150     -0.0360     668.97      -97.74      608.15       0.89       1.07
+BLENDED (tiered sizing)         -0.0150     -0.0360     590.08      -94.72      536.43       0.89       1.07
+------------------------------------------------------------------------------------------------------------
+
+EXIT REASON MIX
+  S1 mean reversion          {'SL_HIT': 2199, 'TRAIL_STOP': 932, 'TP_HIT': 460, 'TIMEOUT': 362}
+  S2 OI/funding squeeze      {'SL_HIT': 33, 'TRAIL_STOP': 20, 'TP_HIT': 10, 'TIMEOUT': 8}
+  S3 consolidation breakout  {'TRAIL_STOP': 2, 'SL_HIT': 1}
+  BLENDED (flat 0.50% risk)  {'SL_HIT': 290, 'TRAIL_STOP': 195, 'TP_HIT': 42, 'TIMEOUT': 17}
+```
+
+### The table above is not interpretable without error bars
+
+```
+$ python3 analysis/significance.py
+
+EXPECTANCY WITH ERROR BARS (per-trade R, two-sided t)
+
+Configuration                     n     exp R      sd               95% CI       t  significant?
+--------------------------------------------------------------------------------------------
+S1 mean reversion              3953   -0.0672    1.25   [-0.1061, -0.0283]   -3.39  yes
+S2 OI/funding squeeze            71   +0.1495    1.28   [-0.1473, +0.4463]   +0.99  NO — indistinguishable from zero
+S3 consolidation breakout         3   -0.1542    0.93   [-1.2072, +0.8988]   -0.29  NO — indistinguishable from zero
+BLENDED                         544   -0.0360    1.19   [-0.1361, +0.0641]   -0.71  NO — indistinguishable from zero
+BLENDED (tiered)                544   -0.0360    1.19   [-0.1361, +0.0641]   -0.71  NO — indistinguishable from zero
+--------------------------------------------------------------------------------------------
+```
+
+- **The blended configuration has no measurable edge in either direction.** Point
+  estimate −0.0360R, profit factor 0.94, but the confidence interval spans zero. At
+  n=544 the correct statement is "no edge detected", not "loses money".
+- **S1 is the one statistically established result, and it is negative.** −0.0672R over
+  3,953 trades, t=−3.39. S1 is also the highest-firing lens in the system.
+- **S2's positive number is not a finding.** n=71, t=0.99, interval spans zero widely.
+  It is also the thinnest sample available: OKX open-interest history reaches back only
+  240 days, so S2 could not be evaluated over most of the 2.7-year span.
+- **S3 produced 3 trades in 2.7 years.** The consolidation criteria (21 days inside a 5%
+  range, then a breakout on 1.5× volume) are effectively never satisfied on this universe.
+
+### The blended configuration is negative *before* costs
+
+Gross expectancy is **−0.0150R**; costs carry it to −0.0360R. This is not an edge being
+eroded by fees — there is no edge to erode. Fees and slippage roughly double the loss,
+but removing them entirely would not produce a profitable system.
+
+Funding is a small **credit** for the blended set (−$97.74) because it runs net short
+into predominantly positive funding.
+
+### A near-miss worth recording
+
+The funding-exact split initially looked like it rescued the system:
+
+```
+$ python3 analysis/funding_exact.py
+BLENDED (flat 0.50% risk)     95    12.03%    3.86%   55.8%   +0.2533   1.64    4.22    7.86
+```
+
+**It is an artifact.** OKX publishes only ~3 months of funding history, so:
+
+```
+BLENDED  funding-exact     95 trades   2026-06-02 → 2026-09-02
+BLENDED  funding-imputed  449 trades   2023-12-18 → 2026-06-02
+Imputed trades entered on or after 2026-06-02: 0
+  -> The two groups do not overlap in time at all.
+     'Funding-exact' is a synonym for 'the last three months'.
+
+  last 3 months        n=95   exp +0.2533R  95% CI [+0.0173, +0.4894]  t=+2.10
+  everything before    n=449  exp -0.0972R  95% CI [-0.2070, +0.0126]  t=-1.74
+```
+
+"Funding-exact" and "the last three months" are the same 95 trades. The split is a
+period comparison, not a data-quality one, and says nothing about whether imputation
+distorted the headline. The last three months did look better — on a recent window
+selected after the fact, at n=95, which is exactly the shape of a result that does not
+replicate.
+
+### Reading notes
+
+- **`maxDD 144.49%` for S1 is not a typo.** Position size is computed from a fixed
+  starting equity rather than compounding, so the curve is additive. It means S1 lost
+  1.44× the starting capital at its worst point.
+- **Tiered sizing changes only magnitude.** Identical trades, identical expectancy in R;
+  the smaller risk budget reduces the loss (−9.80% → −7.82%) and the drawdown
+  (30.58% → 25.78%). Sizing controls damage, not edge.
+- **MAE ≈ MFE across every configuration** (0.89 vs 1.07 R for blended). Trades go about
+  as far against as for — the signature of entries with no directional information.
+
+### Correctness of the toolchain
+
+A backtest is only worth what its engine is worth, so each layer is checked rather than
+trusted:
+
+```
+$ CANDLES_JSON=/tmp/candles.json go test ./src/ -run TestDumpIndicatorsForPortCheck
+  15/15 Python indicator ports match the Go originals to 0.000e+00 relative difference
+
+$ python3 analysis/verify_series.py
+  ema20/rsi14/atr14/adx14 series equal the pointwise forms at every index (max 0.000e+00)
+
+$ python3 analysis/verify_bar_state.py
+  fast bar state == full-prefix recomputation across 16 fields
+  sub-strategy + master-signal disagreements: 0
+
+$ python3 analysis/verify_simulator.py
+  15/15 checks on hand-built price paths: TP/SL fills both sides, cost application,
+  no look-ahead from the signal bar, the fee gate, funding sign convention, MAE/MFE
+```
+
+### What is NOT modelled
+
+Stated plainly, because each of these would move the numbers:
+
+- **Venue.** OKX prices, funding and OI — not Bybit. Funding differs per venue, which
+  bears directly on S2 and S4.
+- **Limit-order fill risk.** Entries are assumed to fill at the signal bar's close. The
+  live bot posts a limit order that may never fill. This flatters the strategy.
+- **The AI layers.** Kronos, the AI Council, reflection memory and sentiment are
+  non-deterministic external calls that cannot be replayed from OHLCV. The blended
+  configuration above is the deterministic indicator stack as it behaves when Kronos
+  returns hold/unavailable. Those layers are measured separately in Step 5.
+- **S2 coverage.** OI history reaches back 240 days, so S2 is evaluated over roughly
+  a quarter of the span the other lenses are.
+
+---
