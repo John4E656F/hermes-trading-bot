@@ -956,3 +956,111 @@ result.
 None of these were changed in this branch: the sessions that produced it were scoped
 to measurement and risk infrastructure, and strategy changes were explicitly out of
 scope. They are recorded here as what the numbers imply, for a separate decision.
+
+---
+
+## Addendum 2 — The side-aware sizing change rests on an inflated sample and a sign error
+
+Commit `0948c60` ("MoA synthesis") introduced side-aware position sizing: BUY risk
+scaled to **0.65×** and BUY stops tightened from 3.0/2.5/2.0× ATR to a flat **1.5×**.
+Its stated justification:
+
+> Historical data (2,971 calls): BUY winners avg 6.58% vs losers avg 8.59%
+> (ratio 0.77x), generating -640.7% PnL despite 50.4% WR.
+> SELL winners ≈ losers (ratio 0.98x), generating +1641.5% PnL.
+
+`analysis/side_asymmetry.py` re-derives that. **Both halves of the justification do
+not survive checking**, and they fail in ways that point in opposite directions from
+the change that was made.
+
+### Problem 1 — "2,971 calls" is the inflated count
+
+2,289 SELL + 682 BUY = **2,971**, which is exactly the raw graded master-action count
+in `kronos_outcomes.jsonl`. Step 3 of this report established that this file inflates
+**8.95×**: the same standing directional call is re-logged on every cron cycle and
+each row is then counted as an independent observation.
+
+```
+$ python3 analysis/side_asymmetry.py
+
+RAW — every logged row counted as an independent call
+side       n      WR  avg win%  avg loss%  W/L ratio   sum PnL%
+BUY      682   50.4%      6.58       8.59       0.77     -640.7
+SELL    2289   41.3%      3.89       3.95       0.98    -1641.5
+
+EPISODE-DEDUPLICATED — one row per independent directional call
+side       n      WR  avg win%  avg loss%  W/L ratio   sum PnL%
+BUY      131   45.0%      7.17       7.33       0.98     -104.9
+SELL     201   49.8%      6.22       9.62       0.65     -350.2
+
+inflation: 3106 rows -> 346 episodes (8.98x)
+```
+
+**The conclusion reverses.**
+
+| Win/loss size ratio | raw | episode-deduplicated |
+|---|---|---|
+| BUY | 0.77 | **0.98** |
+| SELL | 0.98 | **0.65** |
+
+On independent episodes, **BUY is the healthier side (0.98) and SELL is the broken one
+(0.65)**. The change sizes down BUY — penalising the better of the two.
+
+### Problem 2 — the SELL PnL figure has its sign inverted
+
+A short profits when price **falls**, so its PnL is `−change_pct`. The quoted
+`+1641.5%` is `sum(change_pct)` over SELL rows, which measures the inverse of what a
+short earned. The bot's own outcome labels settle which convention is right:
+
+```
+0. Sign convention, checked against the bot's own result labels
+
+   SELL  rows where the label matches 'price fell == correct': 2289/2289
+   BUY   rows where the label matches 'price rose == correct':  680/682
+
+   -> a SELL is scored CORRECT when price FELL, so short PnL = -change_pct.
+```
+
+Unanimous across all 2,289 SELL rows.
+
+```
+sum(change_pct) over SELL rows = +1641.5   <- quoted as SELL "+1641.5% PnL"
+actual SELL PnL = sum(-change_pct)         =  -1641.5
+sum(change_pct) over BUY  rows =  -640.7   <- quoted as BUY "-640.7% PnL" (correct for a long)
+```
+
+The BUY figure is right; the SELL figure is the same quantity with the short-side flip
+omitted. It is also **internally inconsistent with the commit's own numbers**: a 41.3%
+win rate at a 0.98× win/loss ratio arithmetically gives
+`0.413 × 3.89 − 0.587 × 3.95 = −0.71` per call, times 2,289 calls ≈ **−1,626**, which
+matches −1641.5 and cannot be reconciled with +1641.5.
+
+So the README's headline **"Total PnL +1,000.8%"** (`−640.7 + 1641.5`) is
+`−640.7 − 1641.5` = **−2,282.2**. Both sides lost. Neither carried the portfolio.
+
+Separately, summing percentage changes across rows is not a return — it ignores
+compounding and, on a 9×-duplicated sample, counts the same move repeatedly. These
+figures should not be read as portfolio performance in any form.
+
+### Consistency with the rest of this report
+
+Nothing here contradicts the walk-forward results; it corroborates them. The backtest
+found long expectancy **−0.117 R** and short expectancy **−0.006 R** on the blended
+configuration — both negative, with shorts marginally *less* bad, and neither side
+carrying anything.
+
+### What was and was not changed
+
+`0948c60`'s strategy changes are **preserved in full** in this branch. Strategy
+decisions belong to the author, and this report records what the numbers say rather
+than acting on it.
+
+Two consequences worth weighing before the next live run:
+
+1. **The sizing asymmetry is pointed at the wrong side.** On the deduplicated sample
+   BUY is the healthier side; SELL carries the 0.65× ratio.
+2. **The tighter BUY stop interacts with the fee gate.** Trades are refused when the
+   stop sits inside 3× round-trip friction. Halving the BUY stop multiplier to a flat
+   1.5× roughly doubles the ATR a BUY signal needs to clear that gate — from about
+   0.21% of price to about 0.42%. Low-volatility BUY setups that previously passed
+   will now be refused, on top of the 0.65× size reduction.
