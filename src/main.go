@@ -86,13 +86,35 @@ func main() {
 	fmt.Printf("│ 💰 Bybit USDT Balance: $%.2f USDT\n", liveBalance)
 	fmt.Println("└─────────────────────────────────────────────────────────────────┘")
 
-	// ── Emergency Circuit Breaker ──
-	if !scanMode && liveBalance < 5.00 {
-		fmt.Printf("🚨 [EMERGENCY HALT] Available account capital is dangerously low ($%.2f USDT). Halting all strategy calculations and freezing order routing!\n", liveBalance)
-		os.Exit(1)
+	// ── Emergency Circuit Breaker: %-based drawdown ──
+	// Track peak equity across runs via peak_equity.txt
+	peakEquity := readPeakEquity()
+	if liveBalance > peakEquity {
+		peakEquity = liveBalance
+		writePeakEquity(peakEquity)
 	}
-	if scanMode && liveBalance < 5.00 {
-		fmt.Printf("⚠️ [SCAN] Available balance is low ($%.2f USDT). Scan proceeds — no orders will be placed.\n", liveBalance)
+	ddPct := (peakEquity - liveBalance) / peakEquity * 100
+	freezeEntries := false
+
+	if !scanMode {
+		switch {
+		case ddPct >= 15.0:
+			fmt.Printf("🚨 [EMERGENCY HALT] Drawdown %.1f%% ≥ 15%% — Halting all strategy calculations and freezing order routing!\n", ddPct)
+			os.Exit(1)
+		case ddPct >= 10.0:
+			fmt.Printf("🔴 CRITICAL DRAWDOWN: %.1f%% ≥ 10%% — Only Conv3 signals, risk capped at 50%%.\n", ddPct)
+		case ddPct >= 7.0:
+			fmt.Printf("🟠 MODERATE DRAWDOWN: %.1f%% ≥ 7%% — Reducing risk by 50%%, Conv2+ required.\n", ddPct)
+		case ddPct >= 4.0:
+			fmt.Printf("🟡 MILD DRAWDOWN: %.1f%% ≥ 4%% — Reducing risk by 25%%.\n", ddPct)
+		default:
+			fmt.Printf("🟢 NORMAL: No drawdown concern (%.1f%% < 4%%).\n", ddPct)
+		}
+	}
+	if scanMode {
+		if peakEquity > 0 {
+			fmt.Printf("💰 Peak equity: $%.2f | Current: $%.2f | Drawdown: %.1f%%\n", peakEquity, liveBalance, ddPct)
+		}
 	}
 
 	// ── Build watchlist ──
@@ -114,7 +136,6 @@ func main() {
 	globalKronosPredictions = make(map[string]KronosPrediction)
 
 	// ── Max Position Guard ──
-	freezeEntries := false
 	openPositionSymbols := make(map[string]string) // symbol → side for per-symbol guard
 	if !scanMode {
 		openPosCount, openSyms, err := fetchOpenPositions(client, watchlist)
@@ -336,6 +357,38 @@ func parseFloat(s string) (float64, error) {
 		return 0, err
 	}
 	return v, nil
+}
+
+// readPeakEquity reads the peak equity from a local file so it persists across runs.
+// This enables %-based drawdown tracking. Returns 0 if no file exists yet.
+func readPeakEquity() float64 {
+	data, err := os.ReadFile("peak_equity.txt")
+	if err != nil {
+		return 0
+	}
+	var v float64
+	fmt.Sscanf(string(data), "%f", &v)
+	return v
+}
+
+// writePeakEquity persists the current peak equity to disk.
+func writePeakEquity(v float64) {
+	os.WriteFile("peak_equity.txt", []byte(fmt.Sprintf("%.2f", v)), 0644)
+}
+
+// drawdownRiskMultiplier returns a risk reduction factor based on current drawdown.
+// 0-4%: 1.0 normal, 4-7%: 0.75, 7-10%: 0.50, 10%+: 0.25
+func drawdownRiskMultiplier(ddPct float64) float64 {
+	switch {
+	case ddPct >= 10.0:
+		return 0.25
+	case ddPct >= 7.0:
+		return 0.50
+	case ddPct >= 4.0:
+		return 0.75
+	default:
+		return 1.0
+	}
 }
 
 func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionEngine, forceActive bool, watchlist []string, freezeEntries bool, scanMode bool, dryRunMode bool, openPositionSymbols map[string]string) {
