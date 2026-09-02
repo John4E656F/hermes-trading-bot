@@ -54,3 +54,28 @@ B. signal_log.jsonl -- 840 raw rows, resolving against OKX 1H OHLCV
     [51/62] SUIUSDT       3000 1H bars,   13 signals
     [54/62] TRUMPUSDT     3000 1H bars,    2 signals
     [55/62] TRXUSDT       3000 1H bars,    4 signals
+    [56/62] UNIUSDT       3000 1H bars,    1 signals
+    [58/62] VVVUSDT       1468 1H bars,    2 signals
+    [59/62] WIFUSDT       3000 1H bars,    1 signals
+    [61/62] XRPUSDT       3000 1H bars,   22 signals
+    [62/62] ZECUSDT       3000 1H bars,    2 signals
+
+    resolved: 762   dropped (window not closed / no data): 0   not listed on OKX: 13
+    excluded symbols: 1000TOSHIUSDT, BTRUSDT, BTWUSDT, DEXEUSDT, GWEIUSDT, HNTUSDT, IPUSDT, NIULAIUSDT, ONGUSDT, TMXUSDT, TONUSDT, VELVETUSDT, XMRUSDT
+
+B. signal_log.jsonl strategy lenses
+========================================================================================================
+Lens                                 raw n   raw acc   epi n   epi acc  inflation     delta
+--------------------------------------------------------------------------------------------------------
+ALL SIGNALS (blended)                  762     39.6%     762     39.6%      1.00x    +0.0pp
+Trend Sell                             435     31.5%     435     31.5%      1.00x    +0.0pp
+S5 BB Squeeze                          107     56.1%     107     56.1%      1.00x    +0.0pp
+Strict Sell                             76     48.7%      76     48.7%      1.00x    +0.0pp
+S4 Funding Contrarian                   59     54.2%      59     54.2%      1.00x    +0.0pp
+Strict Buy                              41     46.3%      41     46.3%      1.00x    +0.0pp
+Trend Buy                               34     47.1%      34     47.1%      1.00x    +0.0pp
+Overbought Sell                          9     11.1%       9     11.1%      1.00x    +0.0pp
+Oversold Buy                             1      0.0%       1      0.0%      1.00x    +0.0pp
+--------------------------------------------------------------------------------------------------------
+
+Wrote /home/user/hermes-trading-bot/analysis/episode_dedup_results.json

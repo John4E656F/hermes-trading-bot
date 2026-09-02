@@ -17,11 +17,22 @@ smaller and different number.
 
 THE FIX
 -------
-An EPISODE is (symbol, direction, resolution time): one asset, one directional
-call, resolved once against one forward price. Every row sharing that key is
-the same event observed repeatedly. Deduplication keeps one representative --
-the FIRST observation, which is the only one available in real time, before
-the outcome could have influenced anything.
+An EPISODE is one continuous directional call on one asset: a maximal run of
+(symbol, direction) rows in which consecutive rows are separated by LESS than
+the outcome horizon. A 24h-horizon call re-issued an hour later is not an
+independent observation of anything -- it resolves against overlapping price
+action and is driven by the same market state. A new episode begins only when
+the direction flips or the signal goes quiet for a full horizon.
+
+Deduplication keeps one representative per episode: the FIRST observation,
+which is the only one available in real time, before the outcome could have
+influenced anything.
+
+Note on a weaker definition: keying on (symbol, direction, exact resolution
+timestamp) collapses nothing in signal_log.jsonl, because every row carries a
+nanosecond timestamp and therefore a unique resolution instant. It appears to
+show 1.00x inflation while 154 rows of the same standing ADAUSDT SELL call sit
+in the sample. That is why the run-based definition is used below.
 
 This is applied to Kronos and to every strategy lens, side by side, so the
 inflation is visible per lens rather than only in aggregate.
@@ -76,7 +87,7 @@ def parse_ts(s):
 
 
 def dedup_episodes(rows, key_fn, order_fn):
-    """Keep the earliest row per episode key."""
+    """Keep the earliest row per episode key (exact-key form)."""
     groups = collections.defaultdict(list)
     for r in rows:
         k = key_fn(r)
@@ -84,6 +95,32 @@ def dedup_episodes(rows, key_fn, order_fn):
             continue
         groups[k].append(r)
     return [min(g, key=order_fn) for g in groups.values()]
+
+
+def dedup_runs(rows, group_fn, time_fn, gap_ms=HORIZON_MS):
+    """
+    Collapse each maximal run of same-group rows into its FIRST row.
+
+    A new episode starts only when the group changes or when more than one
+    outcome horizon has passed since the previous observation.
+    """
+    groups = collections.defaultdict(list)
+    for r in rows:
+        g = group_fn(r)
+        t = time_fn(r)
+        if g is None or t is None:
+            continue
+        groups[g].append((t, r))
+
+    kept = []
+    for g, items in groups.items():
+        items.sort(key=lambda x: x[0])
+        last = None
+        for t, r in items:
+            if last is None or t - last >= gap_ms:
+                kept.append(r)
+            last = t
+    return kept
 
 
 def accuracy(rows, result_fn):
@@ -115,16 +152,18 @@ def kronos_lenses():
         v = r.get("master_result")
         return None if v in (None, "no_call") else (v == "correct")
 
+    for r in rows:
+        r["_ts"] = parse_ts(r.get("timestamp"))
+
     out = {}
     for label, result_fn, dirn in (
         ("Kronos (AI overlay)", k_result, lambda r: r.get("kronos_direction")),
         ("Master blended action", m_result, lambda r: r.get("master_action")),
     ):
         raw = accuracy(rows, result_fn)
-        kept = dedup_episodes(
-            rows,
-            key_fn=lambda r, d=dirn: (r.get("symbol"), d(r), r.get("resolved_at")),
-            order_fn=lambda r: r.get("timestamp") or "")
+        kept = dedup_runs(rows,
+                          group_fn=lambda r, d=dirn: (r.get("symbol"), d(r)),
+                          time_fn=lambda r: r.get("_ts"))
         out[label] = {"raw": raw, "dedup": accuracy(kept, result_fn)}
     return out
 
@@ -192,20 +231,17 @@ def signal_lenses(resolved):
                 sub["action"] = act
                 lenses[f"{tag} (sub-signal)"].append(sub)
 
+    def collapse(rs):
+        return dedup_runs(rs,
+                          group_fn=lambda r: (r.get("symbol"), r.get("action")),
+                          time_fn=lambda r: r["_ts"])
+
     out = {}
     for label, rows in lenses.items():
-        out[label] = {
-            "raw": accuracy(rows, correct),
-            "dedup": accuracy(dedup_episodes(
-                rows,
-                key_fn=lambda r: (r.get("symbol"), r.get("action"), r.get("_resolved_at")),
-                order_fn=lambda r: r["_ts"]), correct)}
-    out["ALL SIGNALS (blended)"] = {
-        "raw": accuracy(resolved, correct),
-        "dedup": accuracy(dedup_episodes(
-            resolved,
-            key_fn=lambda r: (r.get("symbol"), r.get("action"), r.get("_resolved_at")),
-            order_fn=lambda r: r["_ts"]), correct)}
+        out[label] = {"raw": accuracy(rows, correct),
+                      "dedup": accuracy(collapse(rows), correct)}
+    out["ALL SIGNALS (blended)"] = {"raw": accuracy(resolved, correct),
+                                    "dedup": accuracy(collapse(resolved), correct)}
     return out
 
 
@@ -230,7 +266,8 @@ def print_table(title, results):
 def main():
     print("EPISODE DEDUPLICATION -- every strategy lens")
     print(f"Horizon: {HORIZON_MS // 3600000}h   "
-          f"Episode key: (symbol, direction, resolution time)   Representative: first observation")
+          f"Episode = maximal run of (symbol, direction) with gaps < horizon   "
+          f"Representative: first observation")
 
     k = kronos_lenses()
     if k:

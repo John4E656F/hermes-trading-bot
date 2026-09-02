@@ -81,14 +81,34 @@ def funding_at(funding, ts):
 
 def funding_between(funding, t0, t1, side):
     """
-    Total funding COST over a hold window, as a fraction of notional.
+    Total funding COST over a hold window, as a fraction of notional, plus a
+    flag for whether it was measured or imputed.
+
     Longs pay a positive rate; shorts receive it.
+
+    OKX's public funding-rate history reaches back only ~3 months, while its
+    OHLCV reaches back years. For a hold window OUTSIDE the funding series,
+    returning 0 would silently model those trades as funding-free and flatter
+    the result. Instead the median rate over the available window is applied
+    at the observed 3 settlements/day, and the trade is marked imputed so the
+    funding-exact sub-period can be reported separately.
     """
-    total = 0.0
-    for f in funding:
-        if t0 < f["ts"] <= t1:
-            total += f["rate"] if side == sg.BUY else -f["rate"]
-    return total
+    if not funding:
+        return 0.0, True
+
+    first, last = funding[0]["ts"], funding[-1]["ts"]
+    if t0 >= first and t1 <= last:
+        total = 0.0
+        for f in funding:
+            if t0 < f["ts"] <= t1:
+                total += f["rate"] if side == sg.BUY else -f["rate"]
+        return total, False
+
+    rates = sorted(f["rate"] for f in funding)
+    median = rates[len(rates) // 2]
+    periods = max(0.0, (t1 - t0) / (8 * 3600 * 1000))
+    signed = median if side == sg.BUY else -median
+    return signed * periods, True
 
 
 def build_states(data):
@@ -240,7 +260,7 @@ def simulate_trade(data, states, i, action, strategy_label, conviction, confiden
 
     gross = gross_per_unit * qty
     fees = (notional_in + notional_out) * TAKER_FEE_RATE
-    fund_frac = funding_between(data["funding"], c4h[i]["ts"], exit_ts, action)
+    fund_frac, fund_imputed = funding_between(data["funding"], c4h[i]["ts"], exit_ts, action)
     funding_cost = fund_frac * notional_in
     net = gross - fees - funding_cost
     initial_risk = START_EQUITY * RISK_PCT_FLAT
@@ -259,6 +279,7 @@ def simulate_trade(data, states, i, action, strategy_label, conviction, confiden
         "mae_r": mae * qty / initial_risk,
         "mfe_r": mfe * qty / initial_risk,
         "exit_reason": exit_reason,
+        "funding_imputed": fund_imputed,
         "regime": states[i]["regime"],
         "bars_held": max(1, (exit_ts - c4h[i]["ts"]) // BAR_MS),
     }
@@ -435,6 +456,9 @@ def metrics(trades, label):
         "avg_mfe_r": sum(t["mfe_r"] for t in trades) / n,
         "exit_reasons": dict(collections.Counter(t["exit_reason"] for t in trades)),
         "span_days": span_days,
+        "funding_imputed_n": sum(1 for t in trades if t.get("funding_imputed")),
+        "first_entry": trades[0]["entry_ts"],
+        "last_exit": trades[-1]["exit_ts"],
     }
 
 
