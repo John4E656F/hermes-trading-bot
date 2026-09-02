@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -62,12 +64,28 @@ type DrawdownAction struct {
 	Message         string
 }
 
+// legacyPeakPath is the peak_equity.txt written by the earlier ladder. It is
+// read once, on migration, so a deployed machine does not lose its real
+// high-water mark when this guard takes over.
+const legacyPeakPath = "peak_equity.txt"
+
 // LoadEquityState reads equity_state.json. A missing or unparseable file
 // yields a zero-valued state, which callers seed from the current balance.
+//
+// Migration: when equity_state.json does not exist but peak_equity.txt does,
+// the legacy peak is adopted. Seeding from the CURRENT balance instead would
+// silently understate drawdown — an account already below its high-water mark
+// would restart at 0% drawdown and the guard would not fire until it fell a
+// further 15% from wherever it happened to be.
 func LoadEquityState() *EquityState {
 	var st EquityState
 	data, err := os.ReadFile(equityStatePath)
 	if err != nil {
+		if peak, ok := readLegacyPeak(); ok {
+			fmt.Printf("   📥 Migrated high-water mark $%.2f from %s\n", peak, legacyPeakPath)
+			st.PeakEquity = peak
+			st.PeakAt = time.Now().UTC()
+		}
 		return &st
 	}
 	if err := json.Unmarshal(data, &st); err != nil {
@@ -75,6 +93,20 @@ func LoadEquityState() *EquityState {
 		return &EquityState{}
 	}
 	return &st
+}
+
+// readLegacyPeak parses peak_equity.txt. Returns false when it is absent,
+// unparseable, or non-positive — a bad legacy value must not become a peak.
+func readLegacyPeak() (float64, bool) {
+	data, err := os.ReadFile(legacyPeakPath)
+	if err != nil {
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
+	if err != nil || v <= 0 {
+		return 0, false
+	}
+	return v, true
 }
 
 // Save writes the state back to disk. Written with a temp file + rename so a

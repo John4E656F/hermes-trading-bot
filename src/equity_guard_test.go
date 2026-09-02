@@ -137,3 +137,52 @@ func TestAbsoluteFloorIsSecondary(t *testing.T) {
 		}
 	})
 }
+
+// A deployed machine already has peak_equity.txt from the earlier ladder.
+// Seeding from the current balance instead would restart drawdown at 0% and
+// leave the guard blind to a loss that already happened.
+func TestLegacyPeakMigration(t *testing.T) {
+	withTempState(t, func() {
+		if err := os.WriteFile("peak_equity.txt", []byte("95.04"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Equity is 12.4% below the legacy peak. The guard must see that,
+		// not treat 83.25 as a fresh high-water mark.
+		got := EvaluateDrawdownGuard(83.25, false)
+		if got.PeakEquity != 95.04 {
+			t.Fatalf("peak = %.2f, want the migrated 95.04", got.PeakEquity)
+		}
+		if got.Tier != "NO_NEW_ENTRIES" {
+			t.Errorf("tier = %q, want NO_NEW_ENTRIES at %.2f%% below peak", got.Tier, got.DrawdownPct)
+		}
+		if !got.BlockNewEntries {
+			t.Error("a 12.4% drawdown must block new entries")
+		}
+
+		// After migration the state file owns the peak; the legacy file is
+		// not consulted again and cannot resurrect a stale value.
+		os.WriteFile("peak_equity.txt", []byte("500.00"), 0644)
+		if again := EvaluateDrawdownGuard(83.25, false); again.PeakEquity != 95.04 {
+			t.Errorf("peak = %.2f after persist, want 95.04 — legacy file was re-read",
+				again.PeakEquity)
+		}
+	})
+}
+
+// A corrupt or nonsensical legacy value must not become the high-water mark.
+func TestLegacyPeakRejectsGarbage(t *testing.T) {
+	for _, bad := range []string{"", "   ", "not-a-number", "0", "-12.5"} {
+		withTempState(t, func() {
+			os.WriteFile("peak_equity.txt", []byte(bad), 0644)
+			got := EvaluateDrawdownGuard(100.0, false)
+			if got.PeakEquity != 100.0 {
+				t.Errorf("legacy %q produced peak %.2f, want a fresh seed of 100.00",
+					bad, got.PeakEquity)
+			}
+			if got.Tier != "NORMAL" {
+				t.Errorf("legacy %q produced tier %q, want NORMAL", bad, got.Tier)
+			}
+		})
+	}
+}

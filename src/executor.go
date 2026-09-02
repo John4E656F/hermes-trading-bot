@@ -371,6 +371,14 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 		maxFromCapital := (e.TotalCapital * 0.85) / price
 		if newQty := math.Min(orderValue*scaleFactor/price, maxFromCapital); newQty*price >= MIN_ORDER_USD {
 			qtyStr = strconv.FormatFloat(newQty, 'f', -1, 64)
+			// Keep positionSizeTokens in step with qtyStr. The SIZE GUARD below
+			// validates positionSizeTokens while the order submits qtyStr, so
+			// leaving this stale meant the guard checked the PRE-scale-up size
+			// and the exchange received the larger one — exactly the case the
+			// guard exists to catch. This matters most at deep drawdown on a
+			// small account, where the risk multiplier shrinks the order below
+			// the minimum notional and this branch scales it back up.
+			positionSizeTokens = newQty
 		} else {
 			entry.Executed = false
 			entry.SkipReason = fmt.Sprintf("order value $%.2f below minimum and wallet too small", orderValue)
@@ -386,9 +394,9 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 		targetRisk := e.TotalCapital * riskPct
 		if actualRisk > targetRisk*2.0 {
 			entry.Executed = false
-			entry.SkipReason = fmt.Sprintf("SIZE GUARD: actual SL risk $%.2f > 1.5× target $%.2f", actualRisk, targetRisk)
+			entry.SkipReason = fmt.Sprintf("SIZE GUARD: actual SL risk $%.2f > 2.0× target $%.2f", actualRisk, targetRisk)
 			AppendTradeLog(entry)
-			return fmt.Errorf("SIZE GUARD: actual SL risk $%.2f > 1.5× target $%.2f", actualRisk, targetRisk)
+			return fmt.Errorf("SIZE GUARD: actual SL risk $%.2f > 2.0× target $%.2f", actualRisk, targetRisk)
 		}
 	}
 
