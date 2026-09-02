@@ -4,5 +4,7 @@ __pycache__/
 *.pyc
 *.swp
 hermes-bot
-boteditioncache/
+botedition
+cache/
 analysis/__pycache__/
+analysis/*_run.log
