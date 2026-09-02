@@ -44,3 +44,13 @@ B. signal_log.jsonl -- 840 raw rows, resolving against OKX 1H OHLCV
     [41/62] SAMSUNGUSDT   2021 1H bars,    4 signals
     [42/62] SKHYNIXUSDT   2021 1H bars,   10 signals
     [43/62] SKHYUSDT      1290 1H bars,    1 signals
+    [44/62] SNDKUSDT      3000 1H bars,    3 signals
+    [45/62] SNXXUSDT      1198 1H bars,    2 signals
+    [46/62] SOLUSDT       3000 1H bars,   26 signals
+    [47/62] SOXLUSDT      2545 1H bars,    3 signals
+    [48/62] SPCXUSDT      2833 1H bars,    4 signals
+    [49/62] SPXUSDT       3000 1H bars,    1 signals
+    [50/62] STXUSDT       3000 1H bars,   10 signals
+    [51/62] SUIUSDT       3000 1H bars,   13 signals
+    [54/62] TRUMPUSDT     3000 1H bars,    2 signals
+    [55/62] TRXUSDT       3000 1H bars,    4 signals
