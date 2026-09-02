@@ -634,3 +634,204 @@ Stated plainly, because each of these would move the numbers:
   a quarter of the span the other lenses are.
 
 ---
+
+## Step 5 — Counterfactual measurement of every AI layer
+
+### Method
+
+The question a filter must answer is not "is it accurate?" but **"does acting on it
+beat ignoring it?"** A filter that is right 60% of the time still destroys expectancy
+if the 40% it blocks were the large winners.
+
+Every recorded signal is replayed through the **same** bracket simulator used in Step 4
+— ATR stop and target, trailing stop, taker fees, funding, slippage — **regardless of
+whether the layer let it through**. The trade a layer *blocked* gets a result in R just
+like the trade it allowed. A layer helps only if the set it **allowed** has higher
+expectancy than the set it **blocked**.
+
+### Layer 1 — Kronos AI overlay
+
+```
+$ python3 analysis/counterfactual.py
+  kronos_outcomes.jsonl: 3106 rows -> 1140 episodes
+
+Set                                             n     exp R    win%      PF    total R
+--------------------------------------------------------------------------------------------
+WITHOUT Kronos (trade every signal)           991   -0.3630   29.6%    0.48    -359.71
+WITH Kronos filter (only when it agrees)       59   -0.5254   22.0%    0.26     -31.00
+  -> what the filter BLOCKS (disagrees)        70   -0.3138   25.7%    0.51     -21.97
+  -> Kronos had no call (hold)                862   -0.3558   30.4%    0.49    -306.74
+  -> Kronos made any directional call         129   -0.4106   24.0%    0.39     -52.97
+--------------------------------------------------------------------------------------------
+```
+
+The point estimates run the wrong way for the layer: what Kronos **allowed** (−0.5254R)
+is worse than what it **blocked** (−0.3138R). But that ordering is not established:
+
+```
+$ python3 analysis/layer_significance.py
+
+  allowed − blocked  = -0.2117R   Welch t = -1.46   NOT significant
+  allowed − baseline = -0.1625R   Welch t = -1.62   NOT significant
+```
+
+**Kronos does not measurably change expectancy in either direction.** It makes a
+directional call on only 129 of 991 episodes (87% "hold"), so it is inert on most
+signals and indistinguishable from noise on the rest.
+
+### Layer 2 — 5-model AI Council
+
+```
+  signal_log.jsonl: 28 Council rejections, 12 Council passes recorded
+
+Set                                             n     exp R    win%      PF    total R
+--------------------------------------------------------------------------------------------
+WITHOUT Council (trade both sets)              28   -0.6274   14.3%    0.23     -17.57
+WITH Council filter (it allowed)               11   -0.8030    9.1%    0.11      -8.83
+  -> what the Council BLOCKED                  17   -0.5138   17.6%    0.31      -8.73
+--------------------------------------------------------------------------------------------
+
+  allowed − blocked  = -0.2892R   Welch t = -1.04   NOT significant
+  allowed − baseline = -0.1756R   Welch t = -0.74   NOT significant
+```
+
+Same shape, same non-result, on a far smaller sample. **n=11 allowed and n=17 blocked
+is not a measurement of anything** — it is reported with its sample size so it cannot be
+mistaken for one.
+
+The Council is the most expensive component in the system: five model calls per
+non-HOLD signal, per cycle. Its measured contribution to expectancy is zero, on a
+sample too small to have detected a contribution if one existed. **That is a statement
+about the evidence, not a verdict on the Council.** The instrumentation added in Step 2
+(`council_verdict`, `council_votes` on every logged signal) is what makes a real
+measurement possible from here.
+
+### Layer 3 — TradingAgents-derived agents
+
+```
+  No TradingAgents-derived code exists in this repository. Nothing to measure.
+```
+
+Verified by search across all Go, Python and Markdown sources: no `TradingAgents`,
+`Tauric`, bull/bear researcher, risk debator or fundamentals-analyst code has been
+added to this repository. There are no such verdicts to counterfactual.
+
+### Control — market regime, for scale
+
+```
+Set                                             n     exp R      95% CI
+--------------------------------------------------------------------------------------------
+regime = MIXED                                 41   +0.0540   [-0.2719, +0.3800]
+regime = RANGING                              120   +0.1345   [-0.0805, +0.3494]
+regime = TRENDING                             830   -0.4555   [-0.5160, -0.3950]
+--------------------------------------------------------------------------------------------
+
+  RANGING − TRENDING = +0.5900R   Welch t = +5.18   significant
+```
+
+**The regime split moves expectancy by 0.59R and is highly significant. Neither AI
+layer moves it measurably at all.** Whatever is driving results in this system, it is
+not the AI stack — it is that the strategies bleed badly in ADX>25 trending markets
+(−0.4555R over 830 episodes) and roughly break even elsewhere.
+
+This is a control, not a recommendation: "only trade in RANGING" is a filter chosen
+after seeing the data, on a set the strategies were not designed for, and it would need
+prospective validation before it meant anything.
+
+### One caveat on the baseline
+
+The −0.3630R baseline here is the **ungated** signal population — every master action
+in `kronos_outcomes.jsonl`, with no conviction floor, no confidence floor, no top-3
+ranking, no BTC macro filter, no strategy dedup. Step 4's blended figure (−0.0360R) is
+the **gated** set. They are not the same population and should not be compared as if
+the difference were a treatment effect.
+
+Over roughly the same window (2026-06 → 2026-09) the ungated set ran −0.3630R (n=991)
+while the gated set ran +0.2533R (n=95). That is suggestive that the deterministic gate
+stack does real work — but the gates *select* that subset, which is precisely what makes
+the comparison unreliable, and the same gated configuration over the full 2.7 years is
+−0.0360R. Treat it as a hypothesis to test prospectively, not a finding.
+
+---
+
+## Verdict
+
+**Hermes does not have demonstrable positive expectancy after fees, funding and
+slippage.**
+
+Over **544 episode-deduplicated trades across 2.7 years** in the blended,
+conviction-stacked configuration the system actually ships:
+
+| Metric | Value |
+|---|---|
+| Expectancy | **−0.0360 R** per trade (95% CI −0.1361 to +0.0641) |
+| Profit factor | **0.94** |
+| Sharpe | **−0.43** |
+| Sortino | **−0.67** |
+| Max drawdown | **30.58%** (25.78% at the new tiered sizing) |
+| Net return | **−9.80%** (−7.82% at the new tiered sizing) |
+| Win rate | 44.3% |
+| Avg winner / loser | +1.19 R / −1.01 R |
+| Long / short expectancy | −0.117 R / −0.006 R |
+
+The precise statement is **"no edge detected"**, not "proven to lose money". At n=544
+the confidence interval spans zero. The point estimate is negative, the profit factor is
+below 1.0, and the Sharpe is negative — but none of that is statistically established.
+
+What **is** established, at the 95% level:
+
+- **S1 mean reversion is a losing strategy**: −0.0672 R over 3,953 trades, t = −3.39.
+  It is also the highest-firing lens in the system.
+- **Trending markets are where the money goes**: −0.4555 R over 830 episodes,
+  t = +5.18 against ranging markets.
+
+What is **not** established, and should not be claimed in either direction:
+
+- S2 (+0.1495 R, n=71, t=0.99) — the only positive per-strategy point estimate, on the
+  thinnest sample, over a window limited to 240 days by OI history depth.
+- S3 — 3 trades in 2.7 years.
+- Kronos — inert on 87% of signals, indistinguishable from noise on the rest.
+- The AI Council — n=11 allowed, n=17 blocked. Not a measurement.
+- The blended configuration itself.
+
+### Three observations that constrain what a fix could look like
+
+1. **The blended configuration is negative before costs** (gross −0.0150 R). Fees and
+   slippage roughly double the loss, but eliminating them entirely would not produce a
+   profitable system. This is not an edge being eroded by friction.
+
+2. **MAE ≈ MFE on every configuration** (0.89 vs 1.07 R blended). Trades travel about as
+   far against as for — the signature of entries carrying no directional information.
+   Every episode-deduplicated accuracy lens in Step 3 independently sits near a coin
+   flip, which is the same finding from a different direction.
+
+3. **Position sizing changes damage, not edge.** The Step 0/1 risk work takes the loss
+   from −9.80% to −7.82% and the drawdown from 30.58% to 25.78% on *identical trades*
+   with *identical* −0.0360 R expectancy. That is exactly what risk controls are for,
+   and it is not evidence that anything improved.
+
+### What this report does not establish
+
+- **Nothing here is Bybit data.** Prices, funding and open interest are OKX. Funding is
+  venue-specific, which bears directly on S2 and S4.
+- **Fills are assumed.** Entries fill at the signal bar's close; the live bot posts a
+  limit order that may never fill. This **flatters** the strategy.
+- **The live account was never touched.** No API credentials were available, so the
+  Step 2 outcome pipeline is verified against a fixture in Bybit's exact response
+  shape, not against live closed-PnL. Its first real test is the next production run.
+- **6 real trades exist in the live history.** The entire live record reconstructible
+  from the legacy logs is 6 completed trades, net −$6.38. No statistic in this report
+  rests on them.
+
+### Recommended next step
+
+Run the fixed pipeline and collect real outcome records. Every measurement above is
+either backtest-derived (OKX proxy data) or built on 171 independent live signal
+episodes. The Step 2 instrumentation now records what is needed — per-strategy
+attribution, AI verdicts on trades whether gated or not, R-normalised results, MAE/MFE
+— so that in some months there is a live sample worth testing instead of a 2.67×-to-
+11×-inflated one worth nothing.
+
+The risk controls from Steps 0 and 1 are appropriate to that posture: they are sized to
+survive a long losing run, which is what a system with no measured edge should be
+sized for.

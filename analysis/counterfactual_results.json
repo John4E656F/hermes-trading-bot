@@ -1,0 +1,118 @@
+{
+  "kronos": [
+    {
+      "label": "WITHOUT Kronos (trade every signal)",
+      "n": 991,
+      "expectancy_r": -0.36297389637650057,
+      "win_rate": 29.56609485368315,
+      "profit_factor": 0.4765890142798848,
+      "total_r": -359.70713130911207,
+      "avg_winner_r": 1.1178476578979852,
+      "avg_loser_r": -0.9845795058355613
+    },
+    {
+      "label": "WITH Kronos filter (only when it agrees)",
+      "n": 59,
+      "expectancy_r": -0.5254492916467283,
+      "win_rate": 22.033898305084744,
+      "profit_factor": 0.2630939686984983,
+      "total_r": -31.00150820715697,
+      "avg_winner_r": 0.8514090288318835,
+      "avg_loser_r": -0.914561425695032
+    },
+    {
+      "label": "  -> what the filter BLOCKS (disagrees)",
+      "n": 70,
+      "expectancy_r": -0.31379443750232616,
+      "win_rate": 25.71428571428571,
+      "profit_factor": 0.5057580735304399,
+      "total_r": -21.96561062516283,
+      "avg_winner_r": 1.2487457298782716,
+      "avg_loser_r": -0.8546737262109952
+    },
+    {
+      "label": "  -> Kronos had no call (hold)",
+      "n": 862,
+      "expectancy_r": -0.35584688222365674,
+      "win_rate": 30.39443155452436,
+      "profit_factor": 0.48938248100572823,
+      "total_r": -306.7400124767921,
+      "avg_winner_r": 1.122074897906436,
+      "avg_loser_r": -1.0012060595471308
+    },
+    {
+      "label": "  -> Kronos made any directional call",
+      "n": 129,
+      "expectancy_r": -0.41059782040558007,
+      "win_rate": 24.031007751937985,
+      "profit_factor": 0.38775438433805726,
+      "total_r": -52.96711883231983,
+      "avg_winner_r": 1.0821206616975283,
+      "avg_loser_r": -0.8827842790300322
+    }
+  ],
+  "council": [
+    {
+      "label": "WITHOUT Council (trade both sets)",
+      "n": 28,
+      "expectancy_r": -0.6273888977956977,
+      "win_rate": 14.285714285714285,
+      "profit_factor": 0.22648650186591965,
+      "total_r": -17.566889138279535,
+      "avg_winner_r": 1.2859062185705041,
+      "avg_loser_r": -0.9462714171900647
+    },
+    {
+      "label": "WITH Council filter (it allowed)",
+      "n": 11,
+      "expectancy_r": -0.8029959834197317,
+      "win_rate": 9.090909090909092,
+      "profit_factor": 0.11436627360430882,
+      "total_r": -8.832955817617048,
+      "avg_winner_r": 1.1406433739640807,
+      "avg_loser_r": -0.997359919158113
+    },
+    {
+      "label": "  -> what the Council BLOCKED",
+      "n": 17,
+      "expectancy_r": -0.5137607835683816,
+      "win_rate": 17.647058823529413,
+      "profit_factor": 0.3142818772505387,
+      "total_r": -8.733933320662487,
+      "avg_winner_r": 1.3343271667726453,
+      "avg_loser_r": -0.90977963007003
+    }
+  ],
+  "regime": [
+    {
+      "label": "regime = MIXED",
+      "n": 41,
+      "expectancy_r": 0.054026864148271035,
+      "win_rate": 43.90243902439025,
+      "profit_factor": 1.1084565838119471,
+      "total_r": 2.2151014300791125,
+      "avg_winner_r": 1.2577197445609345,
+      "avg_loser_r": -0.8879936509572918
+    },
+    {
+      "label": "regime = RANGING",
+      "n": 120,
+      "expectancy_r": 0.13446514332705242,
+      "win_rate": 46.666666666666664,
+      "profit_factor": 1.2548258840091417,
+      "total_r": 16.13581719924629,
+      "avg_winner_r": 1.4188708525980747,
+      "avg_loser_r": -0.9893898522850925
+    },
+    {
+      "label": "regime = TRENDING",
+      "n": 830,
+      "expectancy_r": -0.4554916264318522,
+      "win_rate": 26.385542168674696,
+      "profit_factor": 0.3735488725772126,
+      "total_r": -378.0580499384373,
+      "avg_winner_r": 1.029377354413336,
+      "avg_loser_r": -0.9877114411701439
+    }
+  ]
+}
