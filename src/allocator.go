@@ -88,6 +88,19 @@ func kronosToAction(direction string) SignalAction {
 }
 
 func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
+	// ── Symbol Ban Check (MoA recommendation) ──────────────────────────
+	// Banned symbols return HOLD immediately — no signal evaluation, no API costs.
+	if IsBannedSymbol(asset.Symbol) {
+		return StrategySignal{
+			Symbol:     asset.Symbol,
+			Action:     ACTION_HOLD,
+			Strategy:   "HOLD",
+			Reason:     "Symbol banned by reflection filter (WR < 30% after 10+ calls)",
+			Conviction: 0,
+			Confidence: 0.0,
+		}
+	}
+
 	dailyADX := asset.Snap1d.Indicators.ADX14
 	currentRegime := ClassifyRegime(dailyADX)
 
@@ -126,37 +139,34 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	masterStrategy := "HOLD"
 	volSurge := volRatio >= 1.5
 
-	// ── Kronos Prime: AI prediction is the PRIMARY signal seed ─────────
-	// When the Kronos service is up and returns a directional prediction
-	// (buy/sell, not hold), that direction overrides masterAction. The
-	// indicator stack below then acts as confirmation (raises conviction)
-	// or veto (S4 funding conflict / exhaustion / squeeze lock).
-	// If Kronos is hold or unavailable, the indicator tiers run as before.
+	// ── Kronos Vote: weighted contributor, NOT prime override ──────────
+	// MoA FIX (2026-09-02): Converted from prime directive to weighted vote.
+	// Kronos BUY: 53.3% WR (+536% PnL) — strong, but the indicator stack
+	// retains full veto power. Kronos SELL: 47.6% WR (-762% PnL) — actually
+	// hurts performance. Kronos is captured as a bonus vote in conviction scoring.
+	// The kronosVote and kronosConf are used later to boost agreeCount.
 	kronosPred := getKronosPrediction(asset.Symbol)
+	var kronosVote SignalAction = ACTION_HOLD
+	var kronosConf float64 = 0.0
 	if kronosPred != nil {
-		ka := kronosToAction(kronosPred.Direction)
-		if ka != ACTION_HOLD {
-			masterAction = ka
-			masterStrategy = "Kronos AI"
-			masterReason = fmt.Sprintf("Kronos AI predicts %s (direction=%s, zone=%s, conf=%.0f%%)",
-				strings.ToUpper(kronosPred.Direction), kronosPred.Direction, kronosPred.Zone, kronosPred.Confidence*100)
-		}
+		kronosVote = kronosToAction(kronosPred.Direction)
+		kronosConf = kronosPred.Confidence
 		// Log every Kronos prediction so we can later join against
 		// realized price moves and measure AI vs indicator accuracy.
 		AppendKronosLog(KronosLogEntry{
 			Timestamp:        time.Now().UTC(),
 			Symbol:           asset.Symbol,
 			Price:            asset.CurrentPrice,
-			MasterAction:     ka,
-			MasterStrategy:   "Kronos AI",
+			MasterAction:     ACTION_HOLD, // will be determined after indicator stack
+			MasterStrategy:   "PENDING",
 			PreConviction:    0,
-			PreConfidence:    kronosPred.Confidence,
+			PreConfidence:    kronosConf,
 			KronosDirection:  kronosPred.Direction,
 			KronosZone:       kronosPred.Zone,
 			KronosComposite:  kronosPred.Composite,
-			KronosConfidence: kronosPred.Confidence,
+			KronosConfidence: kronosConf,
 			KronosPrice:      kronosPred.Price,
-			Agreement:        "primary",
+			Agreement:        "pending",
 		})
 	}
 
@@ -202,19 +212,18 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	}
 
 	// ── TIER 3: Strong Trend Signals ─────────────────────────────────
-	// Symmetric: both sides require ADX>40 (confirmed trend) and W%R not yet
-	// at extreme exhaustion in the trend direction (room to continue).
-	// SELL: W%R > -70 means price is NOT yet deeply oversold — trend has room to fall.
-	// BUY:  W%R < -70 means price is in oversold dip within uptrend — room to rise.
+	// CRITICAL FIX (2026-09-02): Trend BUY removed — it systematically bought
+	// into pullbacks in overextended uptrends (ADX>40 means trend has been
+	// running for days). The combination of price>EMA20 + W%R<-70 captured
+	// shallow dips in mature trends where the stop would get hit on first
+	// real retracement. This is the #1 contributor to the 0.77x win/loss
+	// ratio on BUY side.
+	// Trend SELL kept: performs fine (0.98x ratio on SELL side).
 	if masterAction == ACTION_HOLD {
 		if dailyADX > 40 && latestPrice < ema20 && wrPct > -70 {
 			masterAction = ACTION_SELL
 			masterReason = fmt.Sprintf("Trend SELL: ADX %.0f>40, below EMA20, W%%R %.0f (trend has room to fall).", dailyADX, wrPct)
 			masterStrategy = "Trend Sell"
-		} else if dailyADX > 40 && latestPrice > ema20 && wrPct < -70 && gain7d > -10.0 {
-			masterAction = ACTION_BUY
-			masterReason = fmt.Sprintf("Trend BUY: ADX %.0f>40, above EMA20, W%%R %.0f (trend has room to rise, 7D %.1f%%).", dailyADX, wrPct, gain7d)
-			masterStrategy = "Trend Buy"
 		}
 	}
 
@@ -231,26 +240,29 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 
 		// Strict BUY: price above EMA20+SMA50+VWAP, RSI bullish, ADX trending, volume.
 		// Symmetric with Strict SELL — pure indicator alignment required on both sides.
+		// CRITICAL FIX (2026-09-02): Added gain7d < 15% guard to prevent buying
+		// into extended rallies. The 7D Performance Gate handles caps retroactively,
+		// but blocking at the entry tier prevents the whole signal chain.
 		vwapBullish := vwap20 == 0 || latestPrice > vwap20
 		if latestPrice > ema20 && latestPrice > sma50 && vwapBullish &&
-			rsi14 > 50 && dailyADX > 25 && volSurge && gain7d > -10.0 {
+			rsi14 > 50 && dailyADX > 25 && volSurge && gain7d > -10.0 && gain7d < 15.0 {
 			masterAction = ACTION_BUY
 			masterReason = fmt.Sprintf("Strict BUY: above EMA20+SMA50+VWAP, RSI %.0f>50, ADX %.0f>25, vol %.2fx, 7D %.1f%%.", rsi14, dailyADX, volRatio, gain7d)
 			masterStrategy = "Strict Buy"
 		}
 	}
 
-	// ── TIER 5: Mean Reversion Extremes ──────────────────────────────
+// ── TIER 5: Mean Reversion Extremes ──────────────────────────────
 	// Mean reversion only works when price is near its average (within the range).
 	// If price has crashed far below EMA20, "oversold" is continuation not reversal.
-// Guard: price must be within 5% of EMA20 for the bounce to be structurally valid.
+	// Guard: price must be within 5% of EMA20 for the bounce to be structurally valid.
 	// Symmetric: same 5% distance check on the overbought SELL side.
 	if masterAction == ACTION_HOLD && ema20 > 0 {
 		priceDistFromEMA := math.Abs(latestPrice-ema20) / ema20
 		if wrPct <= -85 && rsi14 < 30 && volRatio >= 2.0 &&
-			currentRegime == REGIME_RANGING && priceDistFromEMA <= 0.05 && gain7d > -10.0 {
+			currentRegime == REGIME_RANGING && priceDistFromEMA <= 0.05 {
 			masterAction = ACTION_BUY
-			masterReason = fmt.Sprintf("Oversold BUY: W%%R %.0f≤-85, RSI %.0f<30, vol %.2fx, price within %.1f%%%% of EMA20, 7D %.1f%%.", wrPct, rsi14, volRatio, priceDistFromEMA*100, gain7d)
+			masterReason = fmt.Sprintf("Oversold BUY: W%%R %.0f≤-85, RSI %.0f<30, vol %.2fx, price within %.1f%%%% of EMA20.", wrPct, rsi14, volRatio, priceDistFromEMA*100)
 			masterStrategy = "Oversold Buy"
 		}
 		if wrPct >= -15 && rsi14 > 70 && volRatio >= 2.0 &&
@@ -263,13 +275,40 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 
 	// ── Exhaustion Filter ─────────────────────────────────────────────
 	// Block riding pumps/dumps that have already moved too far.
-	if masterAction == ACTION_BUY && gain7d > 40.0 && dailyADX < 50 {
+	// CRITICAL FIX (MoA 2026-09-02): Thresholds tightened based on historical
+	// data showing 0.77x win/loss ratio on BUY — most tops form at 15-25% gains.
+	if masterAction == ACTION_BUY {
+		if gain7d > 35.0 {
+			// Hard block: 35%+ in 7 days is always exhaustion regardless of ADX
+			masterAction = ACTION_HOLD
+			masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D gain >35%% — structural pump risk.", gain7d)
+			masterStrategy = "HOLD"
+		} else if gain7d > 20.0 && dailyADX < 35 {
+			masterAction = ACTION_HOLD
+			masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D gain >20%% (ADX %.0f<35). Pump risk.", gain7d, dailyADX)
+			masterStrategy = "HOLD"
+		}
+	} else if masterAction == ACTION_SELL {
+		if gain7d < -20.0 {
+			masterAction = ACTION_HOLD
+			masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D loss <-20%% — structural capitulation.", gain7d)
+			masterStrategy = "HOLD"
+		} else if gain7d < -12.0 && dailyADX < 35 {
+			masterAction = ACTION_HOLD
+			masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D loss <-12%% (ADX %.0f<35). Capitulation risk.", gain7d, dailyADX)
+			masterStrategy = "HOLD"
+		}
+	}
+
+	// ── Extended Rally Guard (BUY-specific) ───────────────────────────
+	// CRITICAL FIX (2026-09-02): The general exhaustion filter only blocks
+	// BUY when ADX < 50. In strong trends (ADX > 50), buys sail through even
+	// with 40%+ 7D gains — the #1 pattern causing the 0.77x win/loss ratio.
+	// This guard blocks BUY when the asset is already extended in ANY trend.
+	// Even -10% 7D buys are dangerous (falling knife) — handled separately.
+	if masterAction == ACTION_BUY && gain7d > 25.0 {
 		masterAction = ACTION_HOLD
-		masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D gain >40%% (ADX %.0f<50). Pump risk.", gain7d, dailyADX)
-		masterStrategy = "HOLD"
-	} else if masterAction == ACTION_SELL && gain7d < -15.0 && dailyADX < 50 {
-		masterAction = ACTION_HOLD
-		masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D loss <-15%% (ADX %.0f<50). Capitulation risk.", gain7d, dailyADX)
+		masterReason = fmt.Sprintf("Extended rally GUARD: %.0f%% 7D gain >25%% — buying tops is the #1 loss pattern.", gain7d)
 		masterStrategy = "HOLD"
 	}
 
@@ -378,6 +417,20 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 			}
 			advancedReasons += fmt.Sprintf("%s: %s", sub.name, sub.reason)
 		}
+	}
+
+	// ── Kronos Weighted Vote ──────────────────────────────────────────
+	// MoA FIX: Kronos is no longer a prime directive. Instead it contributes
+	// to agreeCount when its direction matches masterAction AND confidence > 0.6.
+	// Historical: Kronos BUY 53.3% WR (+536% PnL) — high confidence agrees with
+	// indicator stack → strong combined signal.
+	if kronosVote == masterAction && kronosConf > 0.6 && masterAction != ACTION_HOLD {
+		agreeCount++
+		advancedReasons += fmt.Sprintf(" | Kronos AI: %s (conf=%.0f%%)", kronosVote, kronosConf*100)
+	} else if kronosVote != ACTION_HOLD && kronosVote != masterAction && masterAction != ACTION_HOLD {
+		// Kronos disagrees — interesting but not penalized; the indicator stack
+		// already decided. Just note it in the reason for later analysis.
+		advancedReasons += fmt.Sprintf(" | Kronos disagrees (%s vs master %s)", kronosVote, masterAction)
 	}
 
 	switch {
@@ -497,7 +550,7 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	// ── Reflection Overlay ────────────────────────────────────────────
 	// Read past performance for this symbol and apply confidence multiplier.
 	// Computed from kronos_outcomes.jsonl — tracks per-symbol master signal win rate.
-	if ref := GetReflection(asset.Symbol); ref != nil {
+	if ref := GetReflection(asset.Symbol, signal.Action); ref != nil {
 		signal.Reflection = ref
 		oldConf := signal.Confidence
 		signal.Confidence = math.Min(signal.Confidence*ref.ConfidenceMultiplier, 0.95)
@@ -509,23 +562,56 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	}
 
 	// ── 7D Performance Gate ───────────────────────────────────────────
-	// Protect against catching falling knives on BUY and late sells on SELL.
-	// A BUY signal when 7D is already deep in the red means we're catching
-	// a falling knife — the downtrend has momentum. A SELL signal after a big
-	// drop means the move is already played out.
-	if signal.Action == ACTION_BUY && gain7d < -10.0 && signal.Confidence > 0.50 {
-		signal.Confidence = math.Min(signal.Confidence, 0.55)
-		if signal.Conviction > 1 {
-			signal.Conviction--
+	// CRITICAL FIX (MoA 2026-09-02): Symmetric falling knife guard for BUY.
+	// Historical data: BUY losers average -8.59% vs winners +6.58% (0.77x ratio).
+	// The original guard only capped confidence — it never blocked.
+	// Now: hard block at -15%, soft block (Conv1 forced) at -8%.
+	// For SELL: tightened from gain7d < -15% to gain7d < -10%.
+	if signal.Action == ACTION_BUY {
+		if gain7d < -15.0 {
+			// Hard block: -15% in 7 days is a structural breakdown — catching
+			// a falling knife that will keep falling. No exceptions.
+			signal.Action = ACTION_HOLD
+			signal.Conviction = 0
+			signal.Confidence = 0.0
+			signal.Strategy = "HOLD"
+			signal.Reason = fmt.Sprintf("FALLING KNIFE BLOCK: 7D %.1f%% < -15%% — structural breakdown, BUY blocked.", gain7d)
+			return signal
 		}
-		signal.Reason += fmt.Sprintf(" | 🔪 falling knife: 7D %.1f%% < -10%% — reduced to %.0f%%", gain7d, signal.Confidence*100)
+		if gain7d < -8.0 && signal.Confidence > 0.50 {
+			signal.Confidence = math.Min(signal.Confidence, 0.45)
+			signal.Conviction = 1
+			signal.Reason += fmt.Sprintf(" | 🔪 falling knife: 7D %.1f%% < -8%% — forced Conv1 (%.0f%% conf)", gain7d, signal.Confidence*100)
+		}
+		// Buying into extended rallies — the #1 cause of large BUY losers
+		if gain7d > 15.0 && signal.Confidence > 0.50 {
+			signal.Confidence = math.Min(signal.Confidence, 0.55)
+			if signal.Conviction > 1 {
+				signal.Conviction--
+			}
+			signal.Reason += fmt.Sprintf(" | 🚀 extended rally: 7D %.1f%% > 15%% — buying top risk, reduced to %.0f%%", gain7d, signal.Confidence*100)
+		}
 	}
-	if signal.Action == ACTION_SELL && gain7d < -15.0 && signal.Confidence > 0.50 {
+	if signal.Action == ACTION_SELL && gain7d < -10.0 && signal.Confidence > 0.50 {
 		signal.Confidence = math.Min(signal.Confidence, 0.55)
 		if signal.Conviction > 1 {
 			signal.Conviction--
 		}
-		signal.Reason += fmt.Sprintf(" | 🐻 late sell: 7D %.1f%% < -15%% — move played out, reduced to %.0f%%", gain7d, signal.Confidence*100)
+		signal.Reason += fmt.Sprintf(" | 🐻 late sell: 7D %.1f%% < -10%% — move played out, reduced to %.0f%%", gain7d, signal.Confidence*100)
+	}
+
+	// ── BUY Conviction Floor ──────────────────────────────────────────
+	// CRITICAL FIX (2026-09-02): BUY signals at Conviction 1 are never
+	// executed (executor requires Conv2+ anyway), but they can waste AI
+	// council API calls and pollute signal ranking. Force Conv1 BUY to HOLD.
+	// SELL Conv1 is allowed through for council evaluation — sells have
+	// healthy 0.98x ratio and the extra screening is valuable.
+	if signal.Action == ACTION_BUY && signal.Conviction <= 1 {
+		signal.Action = ACTION_HOLD
+		signal.Strategy = "HOLD"
+		signal.Reason = "BUY Conviction Floor: Conv1 buys blocked — insufficient evidence for long entries."
+		signal.Conviction = 0
+		signal.Confidence = 0.0
 	}
 
 	return signal

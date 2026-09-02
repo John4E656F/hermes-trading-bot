@@ -11,9 +11,12 @@ import (
 	"sync"
 )
 
-// ReflectionSummary captures what a symbol's trading history tells us.
+// ReflectionSummary captures what a symbol's trading history tells us,
+// split by side (BUY vs SELL) so we don't dilute a good BUY record with
+// a bad SELL record or vice versa.
 type ReflectionSummary struct {
 	Symbol               string  `json:"symbol"`
+	Side                 string  `json:"side"` // "BUY" or "SELL" — added 2026-09-02 for side-split
 	TotalCalls           int     `json:"total_calls"`
 	CorrectCalls         int     `json:"correct_calls"`
 	WinRate              float64 `json:"win_rate"`
@@ -56,20 +59,30 @@ func computeReflectionsUnsafe() map[string]ReflectionSummary {
 		ChangePct float64
 		Correct   bool
 	}
-	grouped := make(map[string][]callRecord)
+	// Group by symbol + side so BUY and SELL performance is tracked independently.
+	// This prevents a strong BUY record from being diluted by weak SELLs.
+	grouped := make(map[string][]callRecord) // key = "SYMBOL_SIDE"
 	for _, o := range outcomes {
-		if o.MasterResult == "no_call" {
+		if o.MasterResult == "no_call" || o.MasterAction == ACTION_HOLD || o.MasterAction == "" {
 			continue
 		}
 		correct := o.MasterResult == "correct"
-		grouped[o.Symbol] = append(grouped[o.Symbol], callRecord{
+		key := string(o.Symbol) + "_" + string(o.MasterAction)
+		grouped[key] = append(grouped[key], callRecord{
 			ChangePct: o.ChangePct,
 			Correct:   correct,
 		})
 	}
 
 	result := make(map[string]ReflectionSummary, len(grouped))
-	for sym, calls := range grouped {
+	for key, calls := range grouped {
+		// Parse symbol and side from the composite key
+		symSide := strings.Split(key, "_")
+		if len(symSide) < 2 {
+			continue
+		}
+		sym := symSide[0]
+		side := symSide[1]
 		total := len(calls)
 		correct := 0
 		for _, c := range calls {
@@ -162,8 +175,10 @@ func computeReflectionsUnsafe() map[string]ReflectionSummary {
 
 		lesson := buildLesson(sym, winRate, recentWR, total, trend, avgWin, avgLoss)
 
-		result[sym] = ReflectionSummary{
+		sideKey := sym + "_" + side
+		result[sideKey] = ReflectionSummary{
 			Symbol:               sym,
+			Side:                 side,
 			TotalCalls:           total,
 			CorrectCalls:         correct,
 			WinRate:              winRate,
@@ -206,22 +221,85 @@ func buildLesson(sym string, wr, recentWR float64, total int, trend string, avgW
 	return strings.Join(parts, " | ")
 }
 
-func GetReflection(symbol string) *ReflectionSummary {
+func GetReflection(symbol string, side SignalAction) *ReflectionSummary {
 	refs := ComputeReflections()
 	if refs == nil {
 		return nil
 	}
-	r, ok := refs[symbol]
+	// Side-split key: "SYMBOL_BUY" or "SYMBOL_SELL"
+	key := symbol + "_" + string(side)
+	r, ok := refs[key]
 	if !ok {
 		return nil
 	}
 	return &r
 }
 
+// IsBannedSymbol returns true if this symbol has proven unprofitable across ALL sides.
+// Ban criteria: ≥10 total calls AND combined win rate < 30%.
+// Hardcoded bans for historically confirmed losers.
+func IsBannedSymbol(symbol string) bool {
+	hardBan := map[string]bool{
+		"AAVEUSDT": true,
+		"IPUSDT":   true,
+		"ARBUSDT":  true,
+		"UNIUSDT":  true,
+	}
+	if hardBan[symbol] {
+		return true
+	}
+	// Dynamic ban from reflection data (any side that clears the threshold)
+	refs := ComputeReflections()
+	if refs == nil {
+		return false
+	}
+	totalCalls := 0
+	correctCalls := 0
+	for key, r := range refs {
+		// Match keys like "AAVEUSDT_BUY" or "AAVEUSDT_SELL"
+		if len(key) >= len(symbol)+1 && key[:len(symbol)] == symbol && key[len(symbol)] == '_' {
+			totalCalls += r.TotalCalls
+			correctCalls += r.CorrectCalls
+		}
+	}
+	if totalCalls >= 10 {
+		wr := float64(correctCalls) / float64(totalCalls)
+		if wr < 0.30 {
+			return true
+		}
+	}
+	return false
+}
+
+// IsWhitelistedSymbol returns true if this symbol has proven consistently profitable.
+// Whitelist criteria: ≥10 total calls AND combined win rate > 65%.
+func IsWhitelistedSymbol(symbol string) bool {
+	refs := ComputeReflections()
+	if refs == nil {
+		return false
+	}
+	totalCalls := 0
+	correctCalls := 0
+	for key, r := range refs {
+		if len(key) >= len(symbol)+1 && key[:len(symbol)] == symbol && key[len(symbol)] == '_' {
+			totalCalls += r.TotalCalls
+			correctCalls += r.CorrectCalls
+		}
+	}
+	if totalCalls >= 10 {
+		wr := float64(correctCalls) / float64(totalCalls)
+		if wr > 0.65 {
+			return true
+		}
+	}
+	return false
+}
+
 type kronosOutcomeLine struct {
-	Symbol       string  `json:"symbol"`
-	ChangePct    float64 `json:"change_pct"`
-	MasterResult string  `json:"master_result"`
+	Symbol       string       `json:"symbol"`
+	ChangePct    float64      `json:"change_pct"`
+	MasterResult string       `json:"master_result"`
+	MasterAction SignalAction `json:"master_action"`
 }
 
 func readKronosOutcomes() []kronosOutcomeLine {
@@ -261,16 +339,19 @@ func ListReflections() string {
 		ref ReflectionSummary
 	}
 	list := make([]entry, 0, len(refs))
-	for sym, ref := range refs {
-		list = append(list, entry{sym, ref})
+	for _, ref := range refs {
+		list = append(list, entry{sym: ref.Symbol + " " + ref.Side, ref: ref})
 	}
 	sort.Slice(list, func(i, j int) bool {
-		return list[i].ref.WinRate < list[j].ref.WinRate
+		if list[i].ref.WinRate != list[j].ref.WinRate {
+			return list[i].ref.WinRate < list[j].ref.WinRate
+		}
+		return list[i].ref.Side < list[j].ref.Side
 	})
 
 	var b strings.Builder
-	b.WriteString("📖 Reflection — Per-Symbol Master Signal History\n\n")
-	b.WriteString(fmt.Sprintf("%-12s %6s %8s %6s %6s\n", "Symbol", "Calls", "WinRate", "Trend", "Mult"))
+	b.WriteString("📖 Reflection — Per-Symbol Per-Side Master Signal History\n\n")
+	b.WriteString(fmt.Sprintf("%-12s %6s %8s %6s %5s\n", "Symbol", "Calls", "WinRate", "Trend", "Mult"))
 	b.WriteString(strings.Repeat("─", 50) + "\n")
 	for _, e := range list {
 		trendSym := "→"

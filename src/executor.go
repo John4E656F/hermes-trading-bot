@@ -152,7 +152,14 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 		return fmt.Errorf("AI COUNCIL: signal rejected — %s", truncate(councilResult.ConsensusSummary, 100))
 	}
 
-	// ── Dynamic risk sizing by confidence ────────────────────────────
+	// ── Side-Aware Dynamic Risk Sizing ────────────────────────────
+	// CRITICAL FIX (2026-09-02): BUY-side loser-size problem.
+	// Historical data (2,971 calls): BUY winners avg 6.58% vs losers avg 8.59%
+	// (ratio 0.77x), generating -640.7% PnL despite 50.4% WR.
+	// SELL winners ≈ losers (ratio 0.98x), generating +1641.5% PnL.
+	//
+	// Fix: BUY gets 0.65x risk multiplier to compensate for larger avg loser.
+	// SELL keeps full sizing.
 	var riskPct float64
 	switch {
 	case confidence >= 0.85:
@@ -161,6 +168,12 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 		riskPct = 0.0050 // 0.50% — CONFIRMED
 	default:
 		riskPct = 0.0035 // 0.35% — baseline Conv2/70%
+	}
+	// Position sizing asymmetry: BUY gets 65% of SELL risk to compensate
+	// for the 0.77x win/loss size ratio on BUY vs 0.98x on SELL.
+	if action == ACTION_BUY {
+		riskPct *= 0.65
+		entry.Reason += fmt.Sprintf(" | BUY-side asymmetry: risk scaled to %.2f%% (0.65x of normal)", riskPct*100)
 	}
 	// Apply drawdown ladder: scales down risk when in drawdown.
 	// 0-4%: 1.0x, 4-7%: 0.75x, 7-10%: 0.50x, 10%+: 0.25x
@@ -190,18 +203,38 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 			existingRisk, proposedRisk, maxAllowed)
 	}
 
-	// ── ADX-aware SL/TP multipliers ───────────────────────────────────
+	// ── Side-Aware ADX-aware SL/TP multipliers ──────────────────────
+	// CRITICAL FIX (2026-09-02): BUY-side loser-size problem.
+	// BUY losers avg 8.59% vs winners 6.58% (0.77x ratio).
+	// Tighter BUY stops (1.5x ATR vs 2.0-3.0x) directly reduce loser size.
+	// SELL keeps standard multipliers which perform well (0.98x ratio).
 	var slMult, tpMult float64
-	switch {
-	case dailyADX < 25:
-		slMult = 3.0
-		tpMult = 7.5 // 2.5:1 RR
-	case dailyADX < 40:
-		slMult = 2.5
-		tpMult = 6.25 // 2.5:1 RR
-	default:
-		slMult = 2.0
-		tpMult = 5.0 // 2.5:1 RR
+	if action == ACTION_BUY {
+		// Tighter stops for BUY: reduce loser magnitude
+		switch {
+		case dailyADX < 25:
+			slMult = 1.5
+			tpMult = 7.5 // 5:1 RR — wider TP relative to tight SL
+		case dailyADX < 40:
+			slMult = 1.5
+			tpMult = 6.25 // 4.2:1 RR
+		default:
+			slMult = 1.5
+			tpMult = 5.0 // 3.3:1 RR
+		}
+	} else {
+		// SELL keeps standard multipliers (proven 0.98x ratio)
+		switch {
+		case dailyADX < 25:
+			slMult = 3.0
+			tpMult = 7.5 // 2.5:1 RR
+		case dailyADX < 40:
+			slMult = 2.5
+			tpMult = 6.25 // 2.5:1 RR
+		default:
+			slMult = 2.0
+			tpMult = 5.0 // 2.5:1 RR
+		}
 	}
 	atrDist := atr * slMult
 
