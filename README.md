@@ -78,7 +78,7 @@ Conviction scoring: S0 base (1) +1 per agreeing sub‑strategy → Conviction 1�
 | **Exhaustion** | 7D gain > 40% / loss > 15% + ADX < 50 | 🛑 Block extended moves |
 | **Friction Gate** | ATR distance < 3× round‑trip fee | 💸 Block insufficient R:R |
 | **Risk Cap** | 7D > +15% or < -10% → cap at 65% confidence | ⚠️ Reduce variance |
-| **Co‑Ranking** | Top 3 by 7D gain/loss, strategy dedup | 🏆 Prevent correlation |
+| **Relative‑Strength Ranking** | Top 3 by 7D gain/loss, strategy dedup | 📈 Prefer momentum leaders/laggards (no correlation protection) |
 | **Double‑Entry** | Existing position or open order on symbol | ⏸️ Skip |
 | **BTC Regime** | Bear→block Conv1-2 longs, Bull→block Conv1-2 shorts | 🟢🟡🔴 Macro filter |
 

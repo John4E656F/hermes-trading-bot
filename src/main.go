@@ -483,7 +483,7 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 			fmt.Printf("   Latest Vol: %.0f  |  20-MA Vol: %.0f  |  Ratio: %.2fx\n", latestVol, avgVol, latestVol/avgVol)
 		}
 
-		topLongs := RankSignalsByGain(buyCandidates, 3)
+		topLongs := RankByRelativeStrength(buyCandidates, 3)
 		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println("  🏆 TOP LONGS (Ranked by 7D Gain)")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -495,7 +495,7 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 			fmt.Println("  (No BUY signals — market lacking strength leaders)")
 		}
 
-		topShorts := RankSignalsByLowestGain(sellCandidates, 3)
+		topShorts := RankByRelativeWeakness(sellCandidates, 3)
 		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println("  🐻 TOP SHORTS (Ranked by Weakest 7D Performance)")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -639,7 +639,12 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 
 		// ── Strategy Deduplication ────────────────────────────────────
 		// Only take the strongest signal per strategy type per cycle.
-		// Prevents correlated entries (e.g. two S4 BUY signals simultaneously).
+		//
+		// This limits how many entries share one STRATEGY, not how much
+		// correlated market exposure is taken on. One S4 BUY and one Trend BUY
+		// on two assets that move together are two different strategy labels
+		// and one directional bet. Correlation is bounded by the portfolio
+		// open-risk cap in executor.go, not here.
 		// The list is already sorted by conviction→|gain|, so first seen = best.
 		seenStrategy := make(map[string]bool)
 		var deduped []RankedSignal
@@ -786,18 +791,37 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 			if !ok {
 				outcome.SkipReason = "ranked outside top 3 (lower conviction/gain)"
 			}
-			AppendSignalSnapshot(SignalSnapshotEntry{
-				Timestamp:  time.Now().UTC(),
-				Symbol:     c.Asset.Symbol,
-				Price:      c.Asset.CurrentPrice,
-				Action:     c.Signal.Action,
-				Strategy:   c.Signal.Strategy,
-				Conviction: c.Signal.Conviction,
-				Confidence: c.Signal.Confidence,
-				Gain7D:     c.Gain7D,
-				Executed:   outcome.Executed,
-				SkipReason: outcome.SkipReason,
-			})
+			active, s1a, s2a, s3a, s4a, s5a := subStrategyLens(c.Signal)
+			snap := SignalSnapshotEntry{
+				Timestamp:        time.Now().UTC(),
+				Symbol:           c.Asset.Symbol,
+				Price:            c.Asset.CurrentPrice,
+				Action:           c.Signal.Action,
+				Strategy:         c.Signal.Strategy,
+				Conviction:       c.Signal.Conviction,
+				Confidence:       c.Signal.Confidence,
+				Gain7D:           c.Gain7D,
+				Executed:         outcome.Executed,
+				SkipReason:       outcome.SkipReason,
+				ActiveStrategies: active,
+				S1Action:         s1a,
+				S2Action:         s2a,
+				S3Action:         s3a,
+				S4Action:         s4a,
+				S5Action:         s5a,
+				Regime:           c.Signal.Regime.String(),
+			}
+			// Kronos and the Council are recorded on every evaluated signal,
+			// gated or not — a layer can only be measured against the trades
+			// it rejected if its call on those trades was written down.
+			if c.Signal.Kronos != nil {
+				snap.KronosDirection = c.Signal.Kronos.Direction
+				snap.KronosConfidence = c.Signal.Kronos.Confidence
+			}
+			if c.Signal.AICouncilResult != nil {
+				snap.CouncilVerdict = c.Signal.AICouncilResult.FinalVerdict
+			}
+			AppendSignalSnapshot(snap)
 		}
 	}
 	fmt.Println("=========================================================================================")
@@ -928,7 +952,7 @@ func sendTelegramSnapshot(client *BybitClient, data MarketData, watchlist []stri
 		})
 	}
 
-	top3 := RankSignalsByGain(candidates, 3)
+	top3 := RankByRelativeStrength(candidates, 3)
 	var top3Str []string
 	for i, c := range top3 {
 		top3Str = append(top3Str, fmt.Sprintf("#%d %s (%+.2f%%)", i+1, c.Asset.Symbol, c.Gain7D))
