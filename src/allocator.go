@@ -211,9 +211,9 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 			masterAction = ACTION_SELL
 			masterReason = fmt.Sprintf("Trend SELL: ADX %.0f>40, below EMA20, W%%R %.0f (trend has room to fall).", dailyADX, wrPct)
 			masterStrategy = "Trend Sell"
-		} else if dailyADX > 40 && latestPrice > ema20 && wrPct < -70 {
+		} else if dailyADX > 40 && latestPrice > ema20 && wrPct < -70 && gain7d > -10.0 {
 			masterAction = ACTION_BUY
-			masterReason = fmt.Sprintf("Trend BUY: ADX %.0f>40, above EMA20, W%%R %.0f (trend has room to rise).", dailyADX, wrPct)
+			masterReason = fmt.Sprintf("Trend BUY: ADX %.0f>40, above EMA20, W%%R %.0f (trend has room to rise, 7D %.1f%%).", dailyADX, wrPct, gain7d)
 			masterStrategy = "Trend Buy"
 		}
 	}
@@ -233,9 +233,9 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		// Symmetric with Strict SELL — pure indicator alignment required on both sides.
 		vwapBullish := vwap20 == 0 || latestPrice > vwap20
 		if latestPrice > ema20 && latestPrice > sma50 && vwapBullish &&
-			rsi14 > 50 && dailyADX > 25 && volSurge {
+			rsi14 > 50 && dailyADX > 25 && volSurge && gain7d > -10.0 {
 			masterAction = ACTION_BUY
-			masterReason = fmt.Sprintf("Strict BUY: above EMA20+SMA50+VWAP, RSI %.0f>50, ADX %.0f>25, vol %.2fx.", rsi14, dailyADX, volRatio)
+			masterReason = fmt.Sprintf("Strict BUY: above EMA20+SMA50+VWAP, RSI %.0f>50, ADX %.0f>25, vol %.2fx, 7D %.1f%%.", rsi14, dailyADX, volRatio, gain7d)
 			masterStrategy = "Strict Buy"
 		}
 	}
@@ -243,20 +243,20 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	// ── TIER 5: Mean Reversion Extremes ──────────────────────────────
 	// Mean reversion only works when price is near its average (within the range).
 	// If price has crashed far below EMA20, "oversold" is continuation not reversal.
-	// Guard: price must be within 8% of EMA20 for the bounce to be structurally valid.
-	// Symmetric: same 8% distance check on the overbought SELL side.
+// Guard: price must be within 5% of EMA20 for the bounce to be structurally valid.
+	// Symmetric: same 5% distance check on the overbought SELL side.
 	if masterAction == ACTION_HOLD && ema20 > 0 {
 		priceDistFromEMA := math.Abs(latestPrice-ema20) / ema20
 		if wrPct <= -85 && rsi14 < 30 && volRatio >= 2.0 &&
-			currentRegime == REGIME_RANGING && priceDistFromEMA <= 0.08 {
+			currentRegime == REGIME_RANGING && priceDistFromEMA <= 0.05 && gain7d > -10.0 {
 			masterAction = ACTION_BUY
-			masterReason = fmt.Sprintf("Oversold BUY: W%%R %.0f≤-85, RSI %.0f<30, vol %.2fx, price within %.1f%% of EMA20.", wrPct, rsi14, volRatio, priceDistFromEMA*100)
+			masterReason = fmt.Sprintf("Oversold BUY: W%%R %.0f≤-85, RSI %.0f<30, vol %.2fx, price within %.1f%%%% of EMA20, 7D %.1f%%.", wrPct, rsi14, volRatio, priceDistFromEMA*100, gain7d)
 			masterStrategy = "Oversold Buy"
 		}
 		if wrPct >= -15 && rsi14 > 70 && volRatio >= 2.0 &&
-			currentRegime == REGIME_RANGING && priceDistFromEMA <= 0.08 {
+			currentRegime == REGIME_RANGING && priceDistFromEMA <= 0.05 {
 			masterAction = ACTION_SELL
-			masterReason = fmt.Sprintf("Overbought SELL: W%%R %.0f≥-15, RSI %.0f>70, vol %.2fx, price within %.1f%% of EMA20.", wrPct, rsi14, volRatio, priceDistFromEMA*100)
+			masterReason = fmt.Sprintf("Overbought SELL: W%%R %.0f≥-15, RSI %.0f>70, vol %.2fx, price within %.1f%%%% of EMA20.", wrPct, rsi14, volRatio, priceDistFromEMA*100)
 			masterStrategy = "Overbought Sell"
 		}
 	}
@@ -267,9 +267,9 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		masterAction = ACTION_HOLD
 		masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D gain >40%% (ADX %.0f<50). Pump risk.", gain7d, dailyADX)
 		masterStrategy = "HOLD"
-	} else if masterAction == ACTION_SELL && gain7d < -40.0 && dailyADX < 50 {
+	} else if masterAction == ACTION_SELL && gain7d < -15.0 && dailyADX < 50 {
 		masterAction = ACTION_HOLD
-		masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D loss <-40%% (ADX %.0f<50). Capitulation risk.", gain7d, dailyADX)
+		masterReason = fmt.Sprintf("Exhaustion: %.0f%% 7D loss <-15%% (ADX %.0f<50). Capitulation risk.", gain7d, dailyADX)
 		masterStrategy = "HOLD"
 	}
 
@@ -485,13 +485,13 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 		signal.Reason += " | S4 TAILWIND: funding structure confirms direction."
 	}
 
-	// ── Risk Cap on extended moves ────────────────────────────────────
-	if gain7d > 25.0 && gain7d <= 40.0 && signal.Confidence > 0.70 {
-		signal.Confidence = 0.70
-		signal.Reason += fmt.Sprintf(" | ⚠️ risk-capped (7D +%.0f%%", gain7d)
-	} else if gain7d < -25.0 && gain7d >= -40.0 && signal.Confidence > 0.70 {
-		signal.Confidence = 0.70
-		signal.Reason += fmt.Sprintf(" | ⚠️ risk-capped (7D %.0f%%", gain7d)
+// ── Risk Cap on extended moves ────────────────────────────────────
+	if gain7d > 15.0 && gain7d <= 40.0 && signal.Confidence > 0.60 {
+		signal.Confidence = math.Min(signal.Confidence, 0.65)
+		signal.Reason += fmt.Sprintf(" | ⚠️ risk-capped (7D +%.0f%%, capped at 65%%", gain7d)
+	} else if gain7d < -10.0 && gain7d >= -40.0 && signal.Confidence > 0.60 {
+		signal.Confidence = math.Min(signal.Confidence, 0.65)
+		signal.Reason += fmt.Sprintf(" | ⚠️ risk-capped (7D %.0f%%, capped at 65%%", gain7d)
 	}
 
 	// ── Reflection Overlay ────────────────────────────────────────────
@@ -506,6 +506,26 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 				ref.WinRate*100, ref.ConfidenceMultiplier, oldConf*100, signal.Confidence*100)
 		}
 		signal.Reason += fmt.Sprintf(" | Lesson: %s", ref.Lesson)
+	}
+
+	// ── 7D Performance Gate ───────────────────────────────────────────
+	// Protect against catching falling knives on BUY and late sells on SELL.
+	// A BUY signal when 7D is already deep in the red means we're catching
+	// a falling knife — the downtrend has momentum. A SELL signal after a big
+	// drop means the move is already played out.
+	if signal.Action == ACTION_BUY && gain7d < -10.0 && signal.Confidence > 0.50 {
+		signal.Confidence = math.Min(signal.Confidence, 0.55)
+		if signal.Conviction > 1 {
+			signal.Conviction--
+		}
+		signal.Reason += fmt.Sprintf(" | 🔪 falling knife: 7D %.1f%% < -10%% — reduced to %.0f%%", gain7d, signal.Confidence*100)
+	}
+	if signal.Action == ACTION_SELL && gain7d < -15.0 && signal.Confidence > 0.50 {
+		signal.Confidence = math.Min(signal.Confidence, 0.55)
+		if signal.Conviction > 1 {
+			signal.Conviction--
+		}
+		signal.Reason += fmt.Sprintf(" | 🐻 late sell: 7D %.1f%% < -15%% — move played out, reduced to %.0f%%", gain7d, signal.Confidence*100)
 	}
 
 	return signal

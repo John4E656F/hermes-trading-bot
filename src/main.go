@@ -29,7 +29,7 @@ func main() {
 	forceSignalToggle := false
 	scanMode := false
 	dryRunMode := false
-	watchlistSize := 100 // default: top 100 USDT pairs by 24h volume
+	watchlistSize := 50 // default: top 50 USDT pairs by 24h volume
 	for _, arg := range os.Args[1:] {
 		switch arg {
 		case "--force-signal":
