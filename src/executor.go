@@ -145,11 +145,11 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 	var riskPct float64
 	switch {
 	case confidence >= 0.85:
-		riskPct = 0.025 // 2.5% — META / high-conviction
+		riskPct = 0.0075 // 0.75% — META / high-conviction (was 2.5%)
 	case confidence >= 0.75:
-		riskPct = 0.020 // 2.0%
+		riskPct = 0.0050 // 0.50% — CONFIRMED (was 2.0%)
 	default:
-		riskPct = 0.015 // 1.5% — baseline Conv2/70%
+		riskPct = 0.0035 // 0.35% — baseline Conv2/70% (was 1.5%)
 	}
 	entry.RiskPct = riskPct
 
