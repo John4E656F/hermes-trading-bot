@@ -36,6 +36,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import hermes_data as hd
+import indicators as ind
 import strategy as sg
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -111,24 +112,55 @@ def funding_between(funding, t0, t1, side):
     return signed * periods, True
 
 
+# Windows large enough for every windowed indicator (SMA50 is the widest,
+# plus one bar because volume_ma excludes the forming candle).
+TAIL_4H = 60
+
+
 def build_states(data):
-    """Per-bar signal state for one symbol. Strictly causal."""
+    """
+    Per-bar signal state for one symbol. Strictly causal: bar i sees only
+    candles[0..i] and daily candles that had already CLOSED by then.
+    """
     c4h, c1d = data["c4h"], data["c1d"]
-    oi_list = data["oi_list"]
     oi_by_ts = data["oi"]
+    funding = data["funding"]
     states = {}
 
+    # Recursive 4H indicators, one pass each.
+    ema20_s = ind.ema_series(c4h, 20)
+    rsi14_s = ind.rsi_series(c4h, 14)
+    atr14_s = ind.atr_series(c4h, 14)
+
+    # Daily context changes once per day, not once per 4H bar.
+    adx1d_s = ind.adx_series(c1d, 14)
+    daily_cache = {}
+
+    def daily_ctx(di):
+        if di not in daily_cache:
+            w = c1d[:di]
+            daily_cache[di] = {
+                "adx": adx1d_s[di - 1] if di >= 28 and adx1d_s[di - 1] is not None else 0.0,
+                "vp": ind.volume_profile(w, 30),
+                "consol": ind.consolidation(w, 21, 5.0),
+                "gain7d": ind.gain_7d(w),
+            }
+        return daily_cache[di]
+
+    # Funding lookup as a forward scan rather than a bisect per bar.
+    fi = -1
     di = 0
     for i in range(WARMUP_4H, len(c4h)):
         ts = c4h[i]["ts"]
-        # Daily candles CLOSED at or before this 4H bar close.
+
         while di < len(c1d) and c1d[di]["ts"] + 86_400_000 <= ts:
             di += 1
         if di < 30:
             continue
-        window1d = c1d[:di]
 
-        fr = funding_at(data["funding"], ts) if data["funding"] else None
+        while fi + 1 < len(funding) and funding[fi + 1]["ts"] <= ts:
+            fi += 1
+        fr = funding[fi]["rate"] if fi >= 0 else None
 
         oi_cur = oi_by_ts.get(ts)
         oi_chg = 0.0
@@ -139,7 +171,13 @@ def build_states(data):
             else:
                 oi_cur = None  # no comparable point: S2 must not fire on a guess
 
-        states[i] = sg.compute_bar_state(c4h[:i + 1], window1d, fr, oi_chg, oi_cur)
+        if ema20_s[i] is None or rsi14_s[i] is None or atr14_s[i] is None:
+            continue
+
+        states[i] = sg.compute_bar_state(
+            c4h[max(0, i + 1 - TAIL_4H):i + 1], None, fr, oi_chg, oi_cur,
+            precomputed={"ema20": ema20_s[i], "rsi14": rsi14_s[i], "atr14": atr14_s[i]},
+            daily_ctx=daily_ctx(di))
     return states
 
 

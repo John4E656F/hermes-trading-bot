@@ -223,3 +223,112 @@ def classify_regime(adx14):
     if adx14 < 20:
         return "RANGING"
     return "MIXED"
+
+
+# ─── Series forms ────────────────────────────────────────────────────────
+#
+# The pointwise functions above take a full prefix and recompute from scratch,
+# which is what the Go code does once per cycle. Calling them for every bar of
+# a multi-year backtest is O(n^2) and does not finish. These series forms
+# produce the identical value at every index in one pass; equality with the
+# pointwise forms is asserted in analysis/verify_series.py.
+
+
+def ema_series(candles, period):
+    out = [None] * len(candles)
+    if len(candles) < period:
+        return out
+    cur = sum(c["close"] for c in candles[:period]) / period
+    out[period - 1] = cur
+    mult = 2.0 / (period + 1.0)
+    for i in range(period, len(candles)):
+        cur = (candles[i]["close"] - cur) * mult + cur
+        out[i] = cur
+    return out
+
+
+def rsi_series(candles, period=14):
+    out = [None] * len(candles)
+    if len(candles) < period + 1:
+        return out
+    gains = losses = 0.0
+    for i in range(1, period + 1):
+        ch = candles[i]["close"] - candles[i - 1]["close"]
+        if ch > 0:
+            gains += ch
+        else:
+            losses -= ch
+    avg_gain, avg_loss = gains / period, losses / period
+    out[period] = 100.0 if avg_loss == 0 else \
+        100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    for i in range(period + 1, len(candles)):
+        ch = candles[i]["close"] - candles[i - 1]["close"]
+        g, l = (ch, 0.0) if ch > 0 else (0.0, -ch)
+        avg_gain = (avg_gain * (period - 1) + g) / period
+        avg_loss = (avg_loss * (period - 1) + l) / period
+        out[i] = 100.0 if avg_loss == 0 else \
+            100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    return out
+
+
+def atr_series(candles, period=14):
+    out = [None] * len(candles)
+    if len(candles) < period + 1:
+        return out
+    cur = sum(_tr(candles[i], candles[i - 1]) for i in range(1, period + 1)) / period
+    out[period] = cur
+    for i in range(period + 1, len(candles)):
+        cur = (cur * (period - 1) + _tr(candles[i], candles[i - 1])) / period
+        out[i] = cur
+    return out
+
+
+def adx_series(candles, period=14):
+    """
+    Value at index i equals adx(candles[:i+1], period) for i >= 2*period-1.
+
+    The Go implementation seeds its smoothed TR/DM at index `period` from the
+    first `period` bars and its ADX from the mean of dx[period : 2*period],
+    neither of which depends on where the prefix ends -- so the whole thing is
+    a single forward recursion.
+    """
+    n = len(candles)
+    out = [None] * n
+    if n < period * 2:
+        return out
+
+    tr = [0.0] * n
+    pdm = [0.0] * n
+    mdm = [0.0] * n
+    for i in range(1, n):
+        up = candles[i]["high"] - candles[i - 1]["high"]
+        dn = candles[i - 1]["low"] - candles[i]["low"]
+        if up > dn and up > 0:
+            pdm[i] = up
+        if dn > up and dn > 0:
+            mdm[i] = dn
+        tr[i] = _tr(candles[i], candles[i - 1])
+
+    s_tr = sum(tr[1:period + 1])
+    s_p = sum(pdm[1:period + 1])
+    s_m = sum(mdm[1:period + 1])
+
+    dx = [0.0] * n
+    for i in range(period, n):
+        if i > period:
+            s_tr = s_tr - s_tr / period + tr[i]
+            s_p = s_p - s_p / period + pdm[i]
+            s_m = s_m - s_m / period + mdm[i]
+        if s_tr == 0:
+            continue
+        dip, dim = s_p / s_tr * 100, s_m / s_tr * 100
+        tot = dip + dim
+        if tot != 0:
+            dx[i] = abs(dip - dim) / tot * 100
+
+    cur = sum(dx[period:period * 2]) / period
+    out[period * 2 - 1] = cur
+    for i in range(period * 2, n):
+        cur = (cur * (period - 1) + dx[i]) / period
+        out[i] = cur
+    return out

@@ -81,24 +81,40 @@ def eval_s5(bb_upper, bb_basis, bb_lower, price, latest_vol, avg_vol):
 
 # ─── Bar state ───────────────────────────────────────────────────────────
 
-def compute_bar_state(c4h, c1d, funding_rate, oi_change_24h, oi_current):
-    """Everything allocator.go reads for one asset at one bar close."""
+def compute_bar_state(c4h, c1d, funding_rate, oi_change_24h, oi_current,
+                      precomputed=None, daily_ctx=None):
+    """
+    Everything allocator.go reads for one asset at one bar close.
+
+    `precomputed` supplies the recursive 4H indicators (EMA/RSI/ATR) from their
+    O(n) series forms, and `daily_ctx` the daily-window derivations, which only
+    change once per day rather than once per 4H bar. Both are optional: without
+    them this recomputes from the prefix exactly as the Go code does, which is
+    what the equivalence test in verify_bar_state.py checks.
+    """
     price = c4h[-1]["close"]
-    ema20 = ind.ema(c4h, 20)
+    if precomputed:
+        ema20, rsi14, atr14 = precomputed["ema20"], precomputed["rsi14"], precomputed["atr14"]
+    else:
+        ema20, rsi14, atr14 = ind.ema(c4h, 20), ind.rsi(c4h, 14), ind.atr(c4h, 14)
+
+    # Windowed indicators: bounded work per bar, so computed directly.
     sma50 = ind.sma(c4h, 50)
-    rsi14 = ind.rsi(c4h, 14)
     wr = ind.williams_r(c4h, 14)
     vwap20 = ind.vwap(c4h, 20)
-    atr14 = ind.atr(c4h, 14)
     bb_u, bb_b, bb_l, bb_w = ind.bollinger(c4h, 20, 2.0)
     avg_vol = ind.volume_ma(c4h, 20)
     latest_vol = c4h[-1]["volume"]
     vol_ratio = latest_vol / avg_vol if avg_vol > 0 else 0.0
 
-    daily_adx = ind.adx(c1d, 14) if len(c1d) >= 28 else 0.0
-    vp = ind.volume_profile(c1d, 30)
-    consol = ind.consolidation(c1d, 21, 5.0)
-    g7 = ind.gain_7d(c1d)
+    if daily_ctx:
+        daily_adx, vp, consol, g7 = (daily_ctx["adx"], daily_ctx["vp"],
+                                     daily_ctx["consol"], daily_ctx["gain7d"])
+    else:
+        daily_adx = ind.adx(c1d, 14) if len(c1d) >= 28 else 0.0
+        vp = ind.volume_profile(c1d, 30)
+        consol = ind.consolidation(c1d, 21, 5.0)
+        g7 = ind.gain_7d(c1d)
 
     return {
         "price": price, "ema20": ema20, "sma50": sma50, "rsi14": rsi14,
