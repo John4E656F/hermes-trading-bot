@@ -37,10 +37,11 @@ type councilMemberConfig struct {
 }
 
 var councilMembers = []councilMemberConfig{
-	{Model: "deepseek/deepseek-chat", Name: "DeepSeek", Timeout: 20 * time.Second},
+	{Model: "deepseek/deepseek-v4-flash", Name: "DeepSeek V4 Flash", Timeout: 20 * time.Second},
 	{Model: "anthropic/claude-sonnet-4", Name: "Claude Sonnet", Timeout: 25 * time.Second},
 	{Model: "google/gemini-2.5-flash", Name: "Gemini Flash", Timeout: 15 * time.Second},
 	{Model: "openai/gpt-4o-2024-11-20", Name: "GPT-4o", Timeout: 25 * time.Second},
+	{Model: "z-ai/glm-5.3-flash", Name: "GLM 5.3 Flash", Timeout: 15 * time.Second},
 }
 
 type AICouncilClient struct {
@@ -273,15 +274,15 @@ func (council *AICouncilClient) FallbackValidateSignal(sig StrategySignal, asset
 	userPrompt := buildCouncilUserPrompt(sig, asset, "")
 
 	fallback := councilMemberConfig{
-		Model:   "deepseek/deepseek-chat",
-		Name:    "DeepSeek (fallback)",
+		Model:   "deepseek/deepseek-v4-flash",
+		Name:    "DeepSeek V4 Flash (fallback)",
 		Timeout: 20 * time.Second,
 	}
 
 	vote, err := council.callModel(fallback, systemPrompt, userPrompt)
 	if err != nil {
 		return CouncilVote{
-			Model:       "DeepSeek (fallback)",
+			Model:       "DeepSeek V4 Flash (fallback)",
 			Verdict:     "CONFIRMED",
 			Confidence:  0.5,
 			Explanation: "Fallback error, proceeding: " + err.Error(),
