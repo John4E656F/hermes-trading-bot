@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 )
 
 // ─── Feature 1: Max Position Guard ───────────────────────────────────────
@@ -147,4 +149,140 @@ func RankByRelativeWeakness(signals []RankedSignal, max int) []RankedSignal {
 		return signals[i].Gain7D < signals[j].Gain7D
 	})
 	return signals[:max]
+}
+
+// ─── Feature 4: Cross-cycle portfolio risk ───────────────────────────────
+
+// LivePortfolioRiskPct returns the SUM of open risk across every live linear
+// position, as a fraction of totalCapital.
+//
+// WHY THIS EXISTS
+// Hermes is not a daemon. run-bot.sh invokes `timeout 120 ./hermes-bot` on a
+// cron, so every cycle is a FRESH PROCESS and every package-level variable
+// starts at its zero value. globalPortfolioRiskPct was reset to 0.0 at the top
+// of each run and incremented only by trades that run placed, which made the
+// portfolio cap blind to every position still open from earlier cycles: five
+// positions carried in from previous runs plus a full cap's worth approved
+// this run is roughly double the stated ceiling. Seeding from this function
+// instead of from zero is what makes the cap mean what it says.
+//
+// Risk per position is the distance from average entry to the stop actually
+// set ON THE EXCHANGE, times size — the dollars lost if that stop fills. A
+// position with NO stop set is charged its FULL position value: it can in
+// principle lose everything, and an unprotected position must never get a
+// free pass in the risk sum.
+//
+// Bybit V5 GET /v5/position/list?category=linear&settleCoin=USDT returns
+// result.list[] with all numbers as STRINGS:
+//
+//	{"retCode":0,"retMsg":"OK","result":{"list":[{
+//	   "symbol":"NEARUSDT",
+//	   "side":"Buy",              // position direction
+//	   "size":"5.9",              // contracts held
+//	   "avgPrice":"2.4353",       // average entry
+//	   "positionValue":"14.368",  // size * avgPrice, quoted by the exchange
+//	   "stopLoss":"2.0889",       // "" or "0" when no stop is set
+//	   "takeProfit":"3.3063",
+//	   "unrealisedPnl":"-0.12",
+//	   "leverage":"3"
+//	}]}}
+func LivePortfolioRiskPct(client *BybitClient, totalCapital float64) (float64, error) {
+	if totalCapital <= 0 {
+		return 0, fmt.Errorf("total capital is %.2f — cannot compute a risk fraction", totalCapital)
+	}
+
+	respBytes, err := client.GetPrivateRequest("/v5/position/list?category=linear&settleCoin=USDT")
+	if err != nil {
+		return 0, fmt.Errorf("position list fetch: %w", err)
+	}
+	return portfolioRiskFromPositions(respBytes, totalCapital)
+}
+
+// portfolioRiskFromPositions is the parsing and arithmetic half of
+// LivePortfolioRiskPct, split out so it can be tested against recorded Bybit
+// payloads without a network round trip or account credentials.
+func portfolioRiskFromPositions(respBytes []byte, totalCapital float64) (float64, error) {
+	if totalCapital <= 0 {
+		return 0, fmt.Errorf("total capital is %.2f — cannot compute a risk fraction", totalCapital)
+	}
+
+	var resp struct {
+		RetCode int    `json:"retCode"`
+		RetMsg  string `json:"retMsg"`
+		Result  struct {
+			List []struct {
+				Symbol        string `json:"symbol"`
+				Side          string `json:"side"`
+				Size          string `json:"size"`
+				AvgPrice      string `json:"avgPrice"`
+				PositionValue string `json:"positionValue"`
+				StopLoss      string `json:"stopLoss"`
+			} `json:"list"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(respBytes, &resp); err != nil {
+		return 0, fmt.Errorf("parse position list: %w", err)
+	}
+	if resp.RetCode != 0 {
+		return 0, fmt.Errorf("bybit error [%d]: %s", resp.RetCode, resp.RetMsg)
+	}
+
+	totalRiskUSD := 0.0
+	counted := 0
+	for _, pos := range resp.Result.List {
+		size, _ := strconv.ParseFloat(pos.Size, 64)
+		if size <= 0 {
+			continue // flat rows are returned with size "0"
+		}
+		avgPrice, _ := strconv.ParseFloat(pos.AvgPrice, 64)
+		if avgPrice <= 0 {
+			continue
+		}
+		counted++
+
+		// Prefer the exchange's own positionValue; fall back to size * entry.
+		notional, _ := strconv.ParseFloat(pos.PositionValue, 64)
+		if notional <= 0 {
+			notional = avgPrice * size
+		}
+
+		// Bybit returns "" or "0" for an unset stop loss.
+		slPrice, slErr := strconv.ParseFloat(pos.StopLoss, 64)
+		if slErr != nil || slPrice <= 0 {
+			totalRiskUSD += notional
+			fmt.Printf("   ⚠️ %s has NO stop loss — counting full position value $%.2f as at-risk\n",
+				pos.Symbol, notional)
+			continue
+		}
+
+		// A stop on the wrong side of entry offers no protection.
+		var adverse float64
+		switch pos.Side {
+		case "Buy":
+			adverse = avgPrice - slPrice
+		case "Sell":
+			adverse = slPrice - avgPrice
+		default:
+			adverse = math.Abs(avgPrice - slPrice)
+		}
+		if adverse <= 0 {
+			totalRiskUSD += notional
+			fmt.Printf("   ⚠️ %s stop $%.6f is not protective vs entry $%.6f — counting full value $%.2f\n",
+				pos.Symbol, slPrice, avgPrice, notional)
+			continue
+		}
+
+		risk := adverse * size
+		if risk > notional {
+			risk = notional // cannot lose more than the position is worth
+		}
+		totalRiskUSD += risk
+		fmt.Printf("   • %s %s: entry $%.6f stop $%.6f size %.6f → risk $%.4f\n",
+			pos.Symbol, pos.Side, avgPrice, slPrice, size, risk)
+	}
+
+	pct := totalRiskUSD / totalCapital
+	fmt.Printf("   📊 Live open risk across %d position(s): $%.4f = %.2f%% of $%.2f equity\n",
+		counted, totalRiskUSD, pct*100, totalCapital)
+	return pct, nil
 }

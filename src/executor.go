@@ -9,17 +9,25 @@ import (
 	"time"
 )
 
+// globalDrawdownMultiplier is set by main() after computing the current
+// drawdown %. Each new position in ExecuteBracketTrade is scaled by this
+// factor, making the drawdown ladder actually bite.
+var globalDrawdownMultiplier float64 = 1.0
+
+// globalPortfolioRiskPct tracks the sum of risk across all open positions.
+// Each new trade checks that adding itself doesn't exceed MAX_PORTFOLIO_RISK.
+//
+// SEEDED, NOT RESET. main() sets this from LivePortfolioRiskPct (see
+// risk_guards.go) before any signal is evaluated, then each executed trade
+// adds its own risk. It used to be reset to 0.0 each cycle, which — because
+// every cron invocation is a fresh process — made the cap blind to positions
+// still open from previous cycles.
+var globalPortfolioRiskPct float64 = 0.0
+const MAX_PORTFOLIO_RISK = 0.04 // 4% total portfolio max stop-out risk
+
 const (
 	TAKER_FEE_RATE = 0.00055 // 0.055% per side on Bybit perpetuals
 	MIN_ORDER_USD  = 5.0     // Bybit minimum notional
-
-	// MAX_PORTFOLIO_RISK_PCT caps the SUM of open risk across every live
-	// position, as a fraction of wallet equity. The 5-position count limit
-	// does not bound risk: five positions at 2.5% each is 12.5% of the account
-	// on a single correlated move. This cap is enforced independently of the
-	// count limit — a new entry is refused when open risk + the new position's
-	// risk would exceed it, regardless of how few positions are open.
-	MAX_PORTFOLIO_RISK_PCT = 0.03 // 3% total open risk
 )
 
 type ExecutionEngine struct {
@@ -27,20 +35,14 @@ type ExecutionEngine struct {
 	AICouncil    *AICouncilClient
 	MaxLeverage  int
 	TotalCapital float64
-
-	// RiskMultiplier scales every position's risk budget. Set from the
-	// peak-relative drawdown guard (see equity_guard.go): 1.0 at normal
-	// equity, 0.75 past −5% from peak, 0.50 past −8%. Zero blocks entries.
-	RiskMultiplier float64
 }
 
 func NewExecutionEngine(client *BybitClient, capital float64) *ExecutionEngine {
 	return &ExecutionEngine{
-		Client:         client,
-		AICouncil:      NewAICouncilClient(),
-		MaxLeverage:    3,
-		TotalCapital:   capital,
-		RiskMultiplier: 1.0,
+		Client:       client,
+		AICouncil:    NewAICouncilClient(),
+		MaxLeverage:  3,
+		TotalCapital: capital,
 	}
 }
 
@@ -190,53 +192,39 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 	var riskPct float64
 	switch {
 	case confidence >= 0.85:
-		riskPct = 0.0075 // 0.75% — META / high-conviction (was 2.5%)
+		riskPct = 0.0075 // 0.75% — META / high-conviction
 	case confidence >= 0.75:
-		riskPct = 0.0050 // 0.50% — CONFIRMED (was 2.0%)
+		riskPct = 0.0050 // 0.50% — CONFIRMED
 	default:
-		riskPct = 0.0035 // 0.35% — baseline Conv2/70% (was 1.5%)
+		riskPct = 0.0035 // 0.35% — baseline Conv2/70%
+	}
+	// Apply drawdown ladder: scales down risk when in drawdown.
+	// 0-4%: 1.0x, 4-7%: 0.75x, 7-10%: 0.50x, 10%+: 0.25x
+	ddMult := globalDrawdownMultiplier
+	if ddMult < 1.0 {
+		oldPct := riskPct
+		riskPct = riskPct * ddMult
+		entry.RiskPct = riskPct
+		fmt.Printf("   📉 Drawdown multiplier: %.2fx (risk %.2f%% → %.2f%%)\n", ddMult, oldPct*100, riskPct*100)
 	}
 
-	// Drawdown-scaled risk. A zero multiplier means the guard has blocked
-	// entries entirely; treat a missing (zero-value) multiplier as unrestricted
-	// so a caller that never set it is not silently frozen.
-	if e.RiskMultiplier == 0 && drawdownGuard.Tier == "" {
-		e.RiskMultiplier = 1.0
-	}
-	if e.RiskMultiplier <= 0 {
-		entry.Executed = false
-		entry.SkipReason = fmt.Sprintf("DRAWDOWN GUARD [%s]: entries blocked (%.2f%% below peak $%.2f)",
-			drawdownGuard.Tier, drawdownGuard.DrawdownPct, drawdownGuard.PeakEquity)
-		AppendTradeLog(entry)
-		return fmt.Errorf("DRAWDOWN GUARD [%s]: new entries blocked at %.2f%% below peak",
-			drawdownGuard.Tier, drawdownGuard.DrawdownPct)
-	}
-	if e.RiskMultiplier < 1.0 {
-		fmt.Printf("   📉 Drawdown guard [%s]: risk %.2f%% × %.2f = %.2f%%\n",
-			drawdownGuard.Tier, riskPct*100, e.RiskMultiplier, riskPct*e.RiskMultiplier*100)
-	}
-	riskPct *= e.RiskMultiplier
 	entry.RiskPct = riskPct
 
-	// ── Portfolio-wide open-risk cap ─────────────────────────────────
-	// Independent of the 5-position count limit. Refuses the entry when the
-	// sum of live open risk plus this position's risk would breach the cap.
-	if openRiskPct, riskErr := e.currentOpenRiskPct(); riskErr != nil {
-		// Fail closed: if open risk cannot be verified, do not add exposure.
+	// ── Portfolio-level risk cap ─────────────────────────────────────
+	// Reject this trade if adding it would push total portfolio risk
+	// above MAX_PORTFOLIO_RISK (4%). This prevents correlated positions
+	// from silently exceeding safe exposure.
+	proposedRisk := e.TotalCapital * riskPct
+	existingRisk := globalPortfolioRiskPct * e.TotalCapital
+	totalRisk := existingRisk + proposedRisk
+	maxAllowed := e.TotalCapital * MAX_PORTFOLIO_RISK
+	if totalRisk > maxAllowed {
 		entry.Executed = false
-		entry.SkipReason = truncate("RISK CAP: cannot verify open risk: "+riskErr.Error(), 200)
+		entry.SkipReason = fmt.Sprintf("PORTFOLIO CAP: $%.2f existing + $%.2f proposed exceeds $%.2f max",
+			existingRisk, proposedRisk, maxAllowed)
 		AppendTradeLog(entry)
-		return fmt.Errorf("RISK CAP: cannot verify current open risk — refusing entry: %w", riskErr)
-	} else if openRiskPct+riskPct > MAX_PORTFOLIO_RISK_PCT {
-		entry.Executed = false
-		entry.SkipReason = fmt.Sprintf("RISK CAP: open risk %.2f%% + new %.2f%% > %.2f%% cap",
-			openRiskPct*100, riskPct*100, MAX_PORTFOLIO_RISK_PCT*100)
-		AppendTradeLog(entry)
-		return fmt.Errorf("RISK CAP: open portfolio risk %.2f%% + new position %.2f%% exceeds %.2f%% cap",
-			openRiskPct*100, riskPct*100, MAX_PORTFOLIO_RISK_PCT*100)
-	} else {
-		fmt.Printf("   🧮 Open portfolio risk: %.2f%% + %.2f%% new = %.2f%% (cap %.2f%%)\n",
-			openRiskPct*100, riskPct*100, (openRiskPct+riskPct)*100, MAX_PORTFOLIO_RISK_PCT*100)
+		return fmt.Errorf("PORTFOLIO RISK CAP: $%.2f existing + $%.2f proposed > $%.2f max",
+			existingRisk, proposedRisk, maxAllowed)
 	}
 
 	// ── ADX-aware SL/TP multipliers ───────────────────────────────────
@@ -492,99 +480,11 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 	entry.Executed = true
 	AppendTradeLog(entry)
 
+	// Track portfolio-level risk: add this position's risk to the running total
+	globalPortfolioRiskPct += riskPct
+	fmt.Printf("   📊 Portfolio risk: %.2f%% / %.0f%% max\n", globalPortfolioRiskPct*100, MAX_PORTFOLIO_RISK*100)
+
 	fmt.Printf("✅ LIMIT ORDER PLACED: %s %s qty=%s limit=$%s | SL=$%s TP=$%s\n",
 		side, symbol, qtyStr, limitPriceStr, stopLossPrice, takeProfitPrice)
 	return nil
-}
-
-// currentOpenRiskPct returns the SUM of open risk across every live linear
-// position, expressed as a fraction of TotalCapital.
-//
-// Risk for one position is the distance from average entry to its stop loss,
-// multiplied by position size: the dollar amount that is lost if the stop is
-// hit. A position with NO stop loss set is charged at full notional — it can
-// in principle lose everything, and it should block further entries until a
-// stop is attached.
-//
-// This is the quantity the 5-position count limit fails to bound. Count limits
-// constrain how MANY bets are open; they say nothing about how large each one
-// is, so five maximum-size entries can put a multiple of the intended risk
-// budget on a single correlated move.
-func (e *ExecutionEngine) currentOpenRiskPct() (float64, error) {
-	if e.TotalCapital <= 0 {
-		return 0, fmt.Errorf("total capital is %.2f — cannot compute risk fraction", e.TotalCapital)
-	}
-
-	respBytes, err := e.Client.GetPrivateRequest("/v5/position/list?category=linear&settleCoin=USDT")
-	if err != nil {
-		return 0, fmt.Errorf("position list fetch: %w", err)
-	}
-
-	var resp struct {
-		RetCode int    `json:"retCode"`
-		RetMsg  string `json:"retMsg"`
-		Result  struct {
-			List []struct {
-				Symbol   string `json:"symbol"`
-				Side     string `json:"side"`
-				Size     string `json:"size"`
-				AvgPrice string `json:"avgPrice"`
-				StopLoss string `json:"stopLoss"`
-			} `json:"list"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(respBytes, &resp); err != nil {
-		return 0, fmt.Errorf("parse position list: %w", err)
-	}
-	if resp.RetCode != 0 {
-		return 0, fmt.Errorf("bybit error [%d]: %s", resp.RetCode, resp.RetMsg)
-	}
-
-	totalRiskUSD := 0.0
-	for _, pos := range resp.Result.List {
-		size, _ := strconv.ParseFloat(pos.Size, 64)
-		if size <= 0 {
-			continue
-		}
-		avgPrice, _ := strconv.ParseFloat(pos.AvgPrice, 64)
-		if avgPrice <= 0 {
-			continue
-		}
-		notional := avgPrice * size
-
-		// Bybit returns "" or "0" for an unset stop loss.
-		slPrice, slErr := strconv.ParseFloat(pos.StopLoss, 64)
-		if slErr != nil || slPrice <= 0 {
-			totalRiskUSD += notional
-			fmt.Printf("   ⚠️ %s has NO stop loss — counting full notional $%.2f as open risk\n",
-				pos.Symbol, notional)
-			continue
-		}
-
-		// A stop on the wrong side of entry (already breached, or misconfigured)
-		// offers no protection — charge full notional rather than a negative risk.
-		adverse := 0.0
-		switch pos.Side {
-		case "Buy":
-			adverse = avgPrice - slPrice
-		case "Sell":
-			adverse = slPrice - avgPrice
-		default:
-			adverse = math.Abs(avgPrice - slPrice)
-		}
-		if adverse <= 0 {
-			totalRiskUSD += notional
-			fmt.Printf("   ⚠️ %s stop $%.6f is not protective vs entry $%.6f — counting full notional $%.2f\n",
-				pos.Symbol, slPrice, avgPrice, notional)
-			continue
-		}
-
-		risk := adverse * size
-		if risk > notional {
-			risk = notional // cannot lose more than the position is worth
-		}
-		totalRiskUSD += risk
-	}
-
-	return totalRiskUSD / e.TotalCapital, nil
 }

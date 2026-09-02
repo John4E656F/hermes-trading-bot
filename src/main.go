@@ -86,29 +86,18 @@ func main() {
 	fmt.Printf("│ 💰 Bybit USDT Balance: $%.2f USDT\n", liveBalance)
 	fmt.Println("└─────────────────────────────────────────────────────────────────┘")
 
-	// ── Peak-relative drawdown guard ──
-	// Evaluated before anything else risk-related so a hard halt exits before
-	// the bot spends API calls scanning. Peak equity is persisted to
-	// equity_state.json and survives the 15-minute cron restarts.
-	//
-	// This supersedes the peak_equity.txt ladder from f73f959, which shared
-	// this design but was inert below the 15% halt: drawdownRiskMultiplier()
-	// was never called, no tier set freezeEntries, and the "Conv3 only" tier
-	// never changed minConviction — every band under 15% only printed a line.
-	// It also wrote the peak before the scan-mode check (so a scan-mode dummy
-	// balance could overwrite a real high-water mark), did not latch the halt,
-	// and tracked peak_equity.txt in git, which resets the peak on every fresh
-	// deploy. See equity_guard.go and equity_guard_test.go.
-	drawdownGuard = ApplyAbsoluteFloor(EvaluateDrawdownGuard(liveBalance, scanMode), liveBalance)
-	fmt.Printf("│ 📉 Drawdown guard [%s]: %s\n", drawdownGuard.Tier, drawdownGuard.Message)
-	if drawdownGuard.HardHalt && !scanMode {
-		fmt.Println("🛑 [HARD HALT] Peak-relative drawdown limit breached. No orders will be placed.")
-		fmt.Println("   Review the account, then delete equity_state.json (or set \"halted\": false) to resume.")
-		os.Exit(1)
+	// ── Peak-relative drawdown ladder ──
+	// Track peak equity across runs via peak_equity.txt. Every cron invocation
+	// is a fresh process, so the high-water mark has to live on disk.
+	peakEquity := readPeakEquity()
+	if liveBalance > peakEquity {
+		peakEquity = liveBalance
+		writePeakEquity(peakEquity)
 	}
-	if drawdownGuard.HardHalt && scanMode {
-		fmt.Println("⚠️ [SCAN] Hard-halt tier active — a live run would exit here.")
-	}
+	ddPct := (peakEquity - liveBalance) / peakEquity * 100
+	// Wire the drawdown ladder into the execution path — executor.go reads
+	// this global when sizing each new position.
+	globalDrawdownMultiplier = drawdownRiskMultiplier(ddPct)
 
 	// ── Emergency Circuit Breaker (absolute floor, secondary net) ──
 	if !scanMode && liveBalance < 5.00 {
@@ -119,9 +108,7 @@ func main() {
 		fmt.Printf("⚠️ [SCAN] Available balance is low ($%.2f USDT). Scan proceeds — no orders will be placed.\n", liveBalance)
 	}
 
-	// The drawdown guard freezes entries from its own tier as well as through
-	// minConviction, so the -12% band actually blocks rather than only printing.
-	freezeEntries := drawdownGuard.BlockNewEntries
+	freezeEntries := false
 
 
 	// ── Build watchlist ──
@@ -168,7 +155,6 @@ func main() {
 
 	// Wire Execution Engine with the LIVE balance
 	executor := NewExecutionEngine(client, liveBalance)
-	executor.RiskMultiplier = drawdownGuard.RiskMultiplier
 
 	marketData := MarketData{
 		Assets:      make(map[string]*AssetSnapshot),
@@ -271,6 +257,31 @@ func main() {
 	marketAnalysis := AnalyzeMarket(marketData, watchlist)
 	PrintMarketAnalysis(marketAnalysis, len(watchlist))
 
+	// ── Seed the portfolio risk counter from LIVE positions ───────────
+	// Not a reset to zero. Every cron invocation is a fresh process, so a
+	// zeroed counter is blind to every position still open from earlier
+	// cycles — the cap would then only bound risk stacked within this one
+	// run's signal loop, while real exposure kept climbing across runs.
+	//
+	// Fail closed: if live exposure cannot be verified, seed at the cap so
+	// every new entry is refused this cycle. Trading blind to open risk is
+	// strictly worse than skipping a cycle.
+	if livePct, err := LivePortfolioRiskPct(client, liveBalance); err != nil {
+		globalPortfolioRiskPct = MAX_PORTFOLIO_RISK
+		fmt.Printf("🚨 Cannot verify live portfolio risk (%v) — seeding at the %.0f%% cap; no new entries this cycle.\n",
+			err, MAX_PORTFOLIO_RISK*100)
+	} else {
+		globalPortfolioRiskPct = livePct
+		headroom := (MAX_PORTFOLIO_RISK - livePct) * 100
+		if livePct >= MAX_PORTFOLIO_RISK {
+			fmt.Printf("🚨 PORTFOLIO CAP ALREADY BREACHED: live open risk %.2f%% ≥ %.0f%% cap — no new entries this cycle.\n",
+				livePct*100, MAX_PORTFOLIO_RISK*100)
+		} else {
+			fmt.Printf("   ✅ Portfolio risk seeded from live positions: %.2f%% used, %.2f%% headroom to the %.0f%% cap\n",
+				livePct*100, headroom, MAX_PORTFOLIO_RISK*100)
+		}
+	}
+
 	printAndExecuteSignals(marketData, marketAnalysis, executor, forceSignalToggle, watchlist, freezeEntries, scanMode, dryRunMode, openPositionSymbols)
 
 	// ── Position Management: enforce max hold / trend flip ────────────
@@ -307,10 +318,6 @@ func main() {
 // totalEquity includes unrealized PnL and is what Bybit shows as the account value.
 // totalAvailableBalance (free margin) was wrong — it drops to ~$59 when $40 is
 // locked in open positions, making the bot think it has less capital than it does.
-// drawdownGuard holds this run's peak-relative drawdown decision. Set once in
-// main() before any sizing or entry decision is made.
-var drawdownGuard DrawdownAction
-
 func fetchLiveBalance(client *BybitClient) (float64, error) {
 	respBytes, err := client.GetPrivateRequest("/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT")
 	if err != nil {
@@ -375,6 +382,38 @@ func parseFloat(s string) (float64, error) {
 		return 0, err
 	}
 	return v, nil
+}
+
+// readPeakEquity reads the peak equity from a local file so it persists across runs.
+// This enables %-based drawdown tracking. Returns 0 if no file exists yet.
+func readPeakEquity() float64 {
+	data, err := os.ReadFile("peak_equity.txt")
+	if err != nil {
+		return 0
+	}
+	var v float64
+	fmt.Sscanf(string(data), "%f", &v)
+	return v
+}
+
+// writePeakEquity persists the current peak equity to disk.
+func writePeakEquity(v float64) {
+	os.WriteFile("peak_equity.txt", []byte(fmt.Sprintf("%.2f", v)), 0644)
+}
+
+// drawdownRiskMultiplier returns a risk reduction factor based on current drawdown.
+// 0-4%: 1.0 normal, 4-7%: 0.75, 7-10%: 0.50, 10%+: 0.25
+func drawdownRiskMultiplier(ddPct float64) float64 {
+	switch {
+	case ddPct >= 10.0:
+		return 0.25
+	case ddPct >= 7.0:
+		return 0.50
+	case ddPct >= 4.0:
+		return 0.75
+	default:
+		return 1.0
+	}
 }
 
 func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionEngine, forceActive bool, watchlist []string, freezeEntries bool, scanMode bool, dryRunMode bool, openPositionSymbols map[string]string) {
@@ -706,20 +745,25 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 		}
 
 
-		// ── Peak-relative Capital Protection ──────────────────────────
-		// Drawdown from the persisted high-water mark drives both the minimum
-		// conviction and the position-risk multiplier. Absolute dollar
-		// thresholds sit underneath as a secondary net (ApplyAbsoluteFloor)
-		// rather than as the primary control: $75 means nothing without
-		// knowing whether the account peaked at $80 or at $800.
-		minConviction := drawdownGuard.MinConviction
-		if minConviction < 2 {
+		// ── Tiered Capital Protection ─────────────────────────────────
+		// Replaces hardcoded $103 peak. Scales minimum conviction requirement
+		// with wallet size so the bot can still trade its way back on high-quality
+		// setups instead of being permanently frozen.
+		minConviction := 2
+		capitalBlocked := false
+		switch {
+		case data.LiveBalance < 20.0:
+			capitalBlocked = true
+			fmt.Printf("🚨 CIRCUIT BREAKER: $%.2f USDT — below $20 minimum. ALL entries halted.\n", data.LiveBalance)
+		case data.LiveBalance < 50.0:
+			minConviction = 3
+			fmt.Printf("🔴 CAPITAL PRESERVATION: $%.2f < $50 — only Conviction 3 (META) signals allowed.\n", data.LiveBalance)
+		case data.LiveBalance < 75.0:
 			minConviction = 2
+			fmt.Printf("🟡 CAUTION MODE: $%.2f < $75 — Conviction 2+ required.\n", data.LiveBalance)
+		default:
+			fmt.Printf("🟢 NORMAL TRADING: $%.2f — all Conviction 2+ signals active.\n", data.LiveBalance)
 		}
-		capitalBlocked := drawdownGuard.BlockNewEntries
-		fmt.Printf("%s (equity $%.2f, peak $%.2f, risk ×%.2f, min conviction %d)\n",
-			drawdownGuard.Message, data.LiveBalance, drawdownGuard.PeakEquity,
-			drawdownGuard.RiskMultiplier, minConviction)
 
 		// ── Signal Snapshot Logging ────────────────────────────────────
 		// Record every non-HOLD candidate this cycle (executed or skipped, and
@@ -737,8 +781,7 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 				outcomes[c.Asset.Symbol] = struct {
 					Executed   bool
 					SkipReason string
-				}{false, fmt.Sprintf("drawdown guard [%s]: %.2f%% below peak $%.2f",
-					drawdownGuard.Tier, drawdownGuard.DrawdownPct, drawdownGuard.PeakEquity)}
+				}{false, fmt.Sprintf("circuit breaker: balance $%.2f below $20 minimum", data.LiveBalance)}
 			}
 		} else {
 			for _, c := range filtered {
