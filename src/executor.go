@@ -97,8 +97,15 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 	fmt.Printf("🛡️ Executor: %s %s @ $%.4f (conv=%d conf=%.0f%% ADX=%.1f)\n",
 		action, symbol, price, sig.Conviction, confidence*100, dailyADX)
 
-	if confidence < 0.70 {
-		return fmt.Errorf("ABORT: confidence %.2f below execution floor 0.70", confidence)
+	// ── Confidence floor ────────────────────────────────────────────────
+	// Bypass-eligible signals (Conv2+ ADX>40, Conv3, S4 extreme) use 0.60 floor.
+	// These are structurally verified — the 0.70 floor is for AI Council signals.
+	var confFloor float64 = 0.70
+	if sig.Conviction >= 3 || (sig.Conviction >= 2 && dailyADX > 40) || (sig.Conviction >= 2 && strings.Contains(sig.Strategy, "S4")) {
+		confFloor = 0.60
+	}
+	if confidence < confFloor {
+		return fmt.Errorf("ABORT: confidence %.2f below floor %.2f (bypass=%v)", confidence, confFloor, confFloor < 0.70)
 	}
 
 	// ── Build trade log skeleton (filled in as we progress) ──────────

@@ -552,19 +552,41 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 			closeConflictingPositions(exec.Client, data)
 		}
 
-		// ── Filter unexecutable penny stocks — skip sub-$0.10 —─
+		// ── Filter unexecutable penny stocks — skip sub-$0.50 or ATR < $0.001 —─
 		var tradableBuys, tradableSells []RankedSignal
 		for _, c := range buyCandidates {
-			if c.Asset.CurrentPrice >= 0.10 {
+			if c.Asset.CurrentPrice >= 0.50 && c.Asset.Snap4h.Indicators.ATR14 >= 0.001 {
 				c.Signal = EvaluateMarketSnapshot(c.Asset)
 				tradableBuys = append(tradableBuys, c)
+			} else {
+				reason := "penny stock"
+				if c.Asset.CurrentPrice < 0.50 {
+					reason = fmt.Sprintf("price $%.4f < $0.50", c.Asset.CurrentPrice)
+				} else if c.Asset.Snap4h.Indicators.ATR14 < 0.001 {
+					reason = fmt.Sprintf("ATR $%.4f < $0.001", c.Asset.Snap4h.Indicators.ATR14)
+				}
+				fmt.Printf("   💰 SKIP: [%s] %s — %s\n", c.Asset.Symbol, "BUY", reason)
 			}
 		}
 		for _, c := range sellCandidates {
-			if c.Asset.CurrentPrice >= 0.10 {
+			if c.Asset.CurrentPrice >= 0.50 && c.Asset.Snap4h.Indicators.ATR14 >= 0.001 {
 				c.Signal = EvaluateMarketSnapshot(c.Asset)
 				tradableSells = append(tradableSells, c)
+			} else {
+				reason := "penny stock"
+				if c.Asset.CurrentPrice < 0.50 {
+					reason = fmt.Sprintf("price $%.4f < $0.50", c.Asset.CurrentPrice)
+				} else if c.Asset.Snap4h.Indicators.ATR14 < 0.001 {
+					reason = fmt.Sprintf("ATR $%.4f < $0.001", c.Asset.Snap4h.Indicators.ATR14)
+				}
+				fmt.Printf("   💰 SKIP: [%s] %s — %s\n", c.Asset.Symbol, "SELL", reason)
 			}
+		}
+
+		// ── BTC Macro Regime (computed early for market bias filter) ──
+		btcRegime := BTCNeutral
+		if btcAsset, ok := data.Assets["BTCUSDT"]; ok {
+			btcRegime = ComputeBTCRegime(btcAsset)
 		}
 
 		// ── Market Bias Filter: signal-count based directional tilt ──
@@ -595,9 +617,9 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 
 		// ── BTC Macro Regime Filter ────────────────────────────────────
 		// BTC direction is the strongest single predictor of altcoin direction.
-		// In a BTC bear: only allow LONG trades if Conviction 3 (exceptional confluence).
-		// In a BTC bull: only allow SHORT trades if Conviction 3.
-		btcRegime := BTCNeutral
+		// In a BTC bear: only allow LONG trades if Conviction 3 or Conv2+ ADX>40.
+		// In a BTC bull: only allow SHORT trades if Conviction 3 or Conv2+ ADX>40.
+		btcRegime = BTCNeutral
 		if btcAsset, ok := data.Assets["BTCUSDT"]; ok {
 			btcRegime = ComputeBTCRegime(btcAsset)
 			fmt.Printf("   %s — price=$%.0f RSI=%.0f ADX=%.0f\n",
@@ -610,7 +632,7 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 		if btcRegime == BTCBear {
 			var allowed []RankedSignal
 			for _, c := range tradableBuys {
-				if c.Signal.Conviction >= 3 {
+				if c.Signal.Conviction >= 3 || (c.Signal.Conviction >= 2 && c.Asset.Snap1d.Indicators.ADX14 > 40) {
 					allowed = append(allowed, c)
 				} else {
 					fmt.Printf("   🔴 BTC BEAR: [%s] LONG Conv%d blocked — need Conv3 in bear market.\n",
@@ -621,7 +643,7 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 		} else if btcRegime == BTCBull {
 			var allowed []RankedSignal
 			for _, c := range tradableSells {
-				if c.Signal.Conviction >= 3 {
+				if c.Signal.Conviction >= 3 || (c.Signal.Conviction >= 2 && c.Asset.Snap1d.Indicators.ADX14 > 40) {
 					allowed = append(allowed, c)
 				} else {
 					fmt.Printf("   🟢 BTC BULL: [%s] SHORT Conv%d blocked — need Conv3 in bull market.\n",
