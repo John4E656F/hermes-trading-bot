@@ -181,20 +181,46 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	// and just paying funding to hold a winning position — not a squeeze setup.
 	if s4.Active {
 		blocked := false
-		// S4 BUY is only valid when price is within 2% of SMA50.
-		// If price is already well below SMA50, shorts are positioned correctly —
-		// they are paying funding because their trade is winning, not because they
-		// are over-leveraged. Symmetric rule applies for S4 SELL.
-		if s4.Action == ACTION_BUY && sma50 > 0 && latestPrice < sma50*0.98 {
+
+		// CRITICAL FIX (2026-09-03): Allow S4 BUY through when shorts are
+		// EXTREMELY crowded (funding ≤ 2× extreme threshold).
+		// At -0.001/s (0.3%/day), shorts pay $109.50/yr to hold $100 position.
+		// This IS economically unsustainable regardless of price position.
+		// The "shorts paying on a winning position" logic is correct at
+		// -0.0005 but wrong at -0.001 — even if price is below SMA50,
+		// the funding bleed will force de-risking.
+		extremeShort := asset.Funding.CurrentRate <= -0.001
+		extremeLong := asset.Funding.CurrentRate >= 0.001
+
+		if s4.Action == ACTION_BUY && extremeShort {
+			// Override guard: -0.001+ funding is always structurally unsustainable.
+			// Price position doesn't matter — shorts WILL be forced out by funding cost.
+			masterAction = s4.Action
+			masterReason = fmt.Sprintf(
+				"S4 EXTREME SHORT SQUEEZE: rate %.4f%% (shorts paying %.3f%%/day). Funding override activated.",
+				asset.Funding.CurrentRate*100, math.Abs(asset.Funding.CurrentRate)*3*100)
+			masterStrategy = "S4 Funding Contrarian"
+		} else if s4.Action == ACTION_BUY && sma50 > 0 && latestPrice < sma50*0.98 {
 			blocked = true
 			masterReason = fmt.Sprintf(
 				"S4 BUY blocked: price $%.4f is %.1f%% below SMA50 $%.4f — shorts paying funding on a winning position, not a squeeze.",
 				latestPrice, (1-latestPrice/sma50)*100, sma50)
+		} else if s4.Action == ACTION_SELL && extremeLong {
+			// Symmetric override for extreme long funding
+			masterAction = s4.Action
+			masterReason = fmt.Sprintf(
+				"S4 EXTREME LONG SQUEEZE: rate +%.4f%% (longs paying %.3f%%/day). Funding override activated.",
+				asset.Funding.CurrentRate*100, math.Abs(asset.Funding.CurrentRate)*3*100)
+			masterStrategy = "S4 Funding Contrarian"
 		} else if s4.Action == ACTION_SELL && sma50 > 0 && latestPrice > sma50*1.02 {
 			blocked = true
 			masterReason = fmt.Sprintf(
 				"S4 SELL blocked: price $%.4f is %.1f%% above SMA50 $%.4f — longs paying funding on a winning position, not a squeeze.",
 				latestPrice, (latestPrice/sma50-1)*100, sma50)
+		}
+		// Additional: OI declining confirms shorts are capitulating
+		if !blocked && s4.Action == ACTION_BUY && asset.OI.Change24h < -5 && extremeShort {
+			masterReason += fmt.Sprintf(" | OI -%.0f%% — shorts capitulating, squeeze firing.", math.Abs(asset.OI.Change24h))
 		}
 		if !blocked {
 			masterAction = s4.Action
@@ -354,14 +380,29 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	// S0 uses Williams%R + VWAP instead of just RSI for better accuracy.
 	s0 := S0Signal{Active: false}
 	if masterAction == ACTION_BUY {
-		// Confirmed bullish: price above VWAP, Williams%R leaving oversold
-		aboveVWAP := vwap20 == 0 || latestPrice > vwap20
-		if rsi14 > 50 && latestPrice > ema20 && aboveVWAP && wrPct < -40 {
-			s0 = S0Signal{Active: true, Action: ACTION_BUY,
-				Reason: fmt.Sprintf("Momentum BUY: RSI %.0f>50, above EMA20+VWAP, W%%R %.0f (room to run).", rsi14, wrPct)}
-		} else if dailyADX > 40 {
-			s0 = S0Signal{Active: true, Action: ACTION_BUY,
-				Reason: fmt.Sprintf("Strong trend bypass (ADX %.0f>40) — S0 confirmed.", dailyADX)}
+		// CRITICAL FIX (2026-09-03): S4 funding contrarian BUY is structurally
+		// predictive — it doesn't need price-action momentum to confirm.
+		// S4 BUY at -0.001+ funding is valid regardless of price position.
+		// S0 only verifies that the direction isn't actively contradicted.
+		if masterStrategy == "S4 Funding Contrarian" {
+			// S4 already signals extreme shorts. S0 checks: as long as price
+			// isn't in full capitulation (W%R > -95 means not at absolute bottom),
+			// the momentum isn't contradicting the squeeze thesis.
+			if wrPct > -95 && rsi14 > 20 {
+				s0 = S0Signal{Active: true, Action: ACTION_BUY,
+					Reason: fmt.Sprintf("S4 BUY S0 bypass: funding rate %.4f%% extreme. W%%R %.0f has room to run.",
+						asset.Funding.CurrentRate*100, wrPct)}
+			}
+		} else {
+			// Confirmed bullish: price above VWAP, Williams%R leaving oversold
+			aboveVWAP := vwap20 == 0 || latestPrice > vwap20
+			if rsi14 > 50 && latestPrice > ema20 && aboveVWAP && wrPct < -40 {
+				s0 = S0Signal{Active: true, Action: ACTION_BUY,
+					Reason: fmt.Sprintf("Momentum BUY: RSI %.0f>50, above EMA20+VWAP, W%%R %.0f (room to run).", rsi14, wrPct)}
+			} else if dailyADX > 40 {
+				s0 = S0Signal{Active: true, Action: ACTION_BUY,
+					Reason: fmt.Sprintf("Strong trend bypass (ADX %.0f>40) — S0 confirmed.", dailyADX)}
+			}
 		}
 	} else if masterAction == ACTION_SELL {
 		belowVWAP := vwap20 == 0 || latestPrice < vwap20
@@ -446,12 +487,40 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 			Confidence: 0.0,
 		}
 
-	case agreeCount == 1:
-		// S0 only. Eligible for boost if conditions are exceptional.
-		boost := false
-		boostReason := ""
+case agreeCount == 1:
+			// S0 only. Eligible for boost if conditions are exceptional.
+			boost := false
+			boostReason := ""
 
-		if dailyADX > 40 {
+			// CRITICAL FIX (2026-09-03): Trend SELL auto-boost.
+			// Trend SELL is our strongest signal type (ADX>40 + below EMA20).
+			// S0 already verified it via the ADX>40 bypass. No sub-strategy
+			// can agree because shorts-crowded trending markets have:
+			//   S1 → VAH out of reach, S2 → funding fires BUY, S3 → no consolidation
+			//        S4 → funding fires BUY, S5 → no BB squeeze active
+			// This is a structural impossibility, not a weak signal.
+			// Grant Conv2 automatically for ADX>40 + S0-confirmed Trend SELL.
+			if masterStrategy == "Trend Sell" && dailyADX > 40 {
+				boost = true
+				boostReason = fmt.Sprintf("Trend SELL auto-boost: ADX %.0f>40, S0 confirmed — strongest signal type", dailyADX)
+			}
+			// Strict SELL with multi-MA alignment is also structurally sound
+			if !boost && masterStrategy == "Strict Sell" && dailyADX > 25 {
+				boost = true
+				boostReason = fmt.Sprintf("Strict SELL auto-boost: ADX %.0f>25, multi-MA alignment", dailyADX)
+			}
+			// S4 Funding Contrarian is self-validating by funding economics
+			if !boost && masterStrategy == "S4 Funding Contrarian" {
+				boost = true
+				boostReason = "S4 Funding Contrarian: funding extreme confirms direction"
+			}
+			// S5 BB Squeeze breakout is self-validating
+			if !boost && strings.HasPrefix(masterStrategy, "S5") {
+				boost = true
+				boostReason = "S5 BB Squeeze: self-validating breakout energy release"
+			}
+
+			if !boost && dailyADX > 40 {
 			if masterAction == ACTION_BUY && wrPct < -60 {
 				boost = true
 				boostReason = fmt.Sprintf("Strong trend (ADX %.0f>40) + W%%R %.0f<-60 (not overbought)", dailyADX, wrPct)
@@ -553,7 +622,12 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	if ref := GetReflection(asset.Symbol, signal.Action); ref != nil {
 		signal.Reflection = ref
 		oldConf := signal.Confidence
-		signal.Confidence = math.Min(signal.Confidence*ref.ConfidenceMultiplier, 0.95)
+		// CRITICAL FIX (2026-09-03): Only apply reflection multiplier when
+		// Conviction >= 2. Conv1 signals are logged but never executed — they
+		// should not reduce confidence for future legitimate signals.
+		if signal.Conviction >= 2 {
+			signal.Confidence = math.Min(signal.Confidence*ref.ConfidenceMultiplier, 0.95)
+		}
 		if signal.Confidence != oldConf {
 			signal.Reason += fmt.Sprintf(" | Reflection: %.0f%% WR → %.1fx mult (conf %.0f%%→%.0f%%)",
 				ref.WinRate*100, ref.ConfidenceMultiplier, oldConf*100, signal.Confidence*100)
@@ -607,11 +681,23 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	// SELL Conv1 is allowed through for council evaluation — sells have
 	// healthy 0.98x ratio and the extra screening is valuable.
 	if signal.Action == ACTION_BUY && signal.Conviction <= 1 {
-		signal.Action = ACTION_HOLD
-		signal.Strategy = "HOLD"
-		signal.Reason = "BUY Conviction Floor: Conv1 buys blocked — insufficient evidence for long entries."
-		signal.Conviction = 0
-		signal.Confidence = 0.0
+		// CRITICAL FIX (2026-09-03): Allow S4 Funding Contrarian BUY at Conv1.
+		// S4 is structurally validated by funding rate economics — shorts paying
+		// -0.001+/8h means forced de-risking is inevitable regardless of price.
+		// Block only speculative BUY signals that didn't meet conviction.
+		if signal.Strategy == "S4 Funding Contrarian" || signal.Strategy == "CONFIRMED: S4 Funding Contrarian" {
+			// Allow through — funding contrarian doesn't need price momentum to be valid.
+			// But cap confidence to 0.70 (minimum execution threshold) so it still
+			// gets sized at baseline risk (0.35%).
+			signal.Confidence = math.Max(signal.Confidence, 0.70)
+			signal.Reason += " | S4 funding contrarian BUY bypasses Conv1 floor — funding economics override."
+		} else {
+			signal.Action = ACTION_HOLD
+			signal.Strategy = "HOLD"
+			signal.Reason = "BUY Conviction Floor: Conv1 buys blocked — insufficient evidence for long entries."
+			signal.Conviction = 0
+			signal.Confidence = 0.0
+		}
 	}
 
 	return signal
