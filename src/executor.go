@@ -176,6 +176,28 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 		councilResult.FinalVerdict, councilResult.Confidence*100,
 		councilResult.ConfirmCount, councilResult.RejectCount, councilResult.ErroredCount)
 
+	// Conviction override: bypass AI Council for structurally sound signals
+	councilOverride := false
+	overrideReason := ""
+	if sig.Conviction >= 3 {
+		councilOverride = true
+		overrideReason = fmt.Sprintf("Conv%d override: highest confidence signal", sig.Conviction)
+	} else if sig.Conviction >= 2 && dailyADX > 40 {
+		councilOverride = true
+		overrideReason = fmt.Sprintf("Conv%d override: ADX %.0f>40 strong trend", sig.Conviction, dailyADX)
+	} else if sig.Conviction >= 2 && strings.Contains(sig.Strategy, "S4") {
+		councilOverride = true
+		overrideReason = "Conv2 override: S4 funding contrarian self-validating"
+	}
+	if councilOverride {
+		fmt.Printf("   🏆 AI Council BYPASSED: %s — signal proceeds to execution\n", overrideReason)
+		councilResult.FinalVerdict = "CONFIRMED"
+		councilResult.Confidence = math.Max(councilResult.Confidence, 0.70)
+		entry.AIVerdict = "CONFIRMED"
+		entry.AIConfidence = councilResult.Confidence
+		entry.AIReason = "Conviction override: " + overrideReason
+	}
+
 	if councilResult.FinalVerdict == "REJECTED" {
 		entry.Executed = false
 		entry.SkipReason = truncate("AI Council rejected: "+councilResult.ConsensusSummary, 200)
