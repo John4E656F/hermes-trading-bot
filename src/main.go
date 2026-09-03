@@ -165,7 +165,7 @@ func main() {
 	// ── Concurrent Data Ingestion Pipeline ──
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	sem := make(chan struct{}, 10) // Concurrency semaphore: max 10 parallel requests to respect Bybit rate limits
+	sem := make(chan struct{}, 20) // Concurrency: 20 — batches 50 assets fast under Bybit rate limits
 
 	fmt.Printf("⚡ Initiating concurrent ingestion pipeline for %d assets...\n", len(watchlist))
 
@@ -472,8 +472,8 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 		)
 		fmt.Printf("   ┗━ Local Reason: %s\n", sig.Reason)
 
-		// ── AI Council Evaluation for non-HOLD signals (scan + dry + live) ──
-		if sig.Action != ACTION_HOLD {
+		// ── AI Council Evaluation for non-HOLD signals (skip in scan-only mode, runs in dry-run and live) ──
+		if sig.Action != ACTION_HOLD && (dryRunMode || !scanMode) {
 			councilResult, councilLine := exec.EvaluateSignalCouncil(sig, asset)
 			fmt.Println(councilLine)
 
