@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,9 +16,10 @@ import (
 var globalDrawdownMultiplier float64 = 1.0
 
 // globalPortfolioRiskPct tracks the sum of risk across all open positions.
-// Each new trade checks that adding itself doesn't exceed MAX_PORTFOLIO_RISK.
-// Reset to 0 at the start of each cycle, incremented per executed trade.
-var globalPortfolioRiskPct float64 = 0.0
+// Persisted to disk between cron cycles so the portfolio risk cap works
+// across sequential runs (positions opened in cycle N are remembered in cycle N+1).
+// Loaded from file at init, saved after each new trade.
+var globalPortfolioRiskPct = loadPortfolioRisk()
 const MAX_PORTFOLIO_RISK = 0.04 // 4% total portfolio max stop-out risk
 
 const (
@@ -265,7 +267,17 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 			tpMult = 5.0 // 2.5:1 RR
 		}
 	}
-	atrDist := atr * slMult
+	var atrDist float64
+	// ── ATR zero guard ───────────────────────────────────────────────
+	// If ATR is zero (edge case: stale/no candles), distance-based sizing
+	// produces Infinity. Fall back to a hard-coded 2% of price as SL distance.
+	if atr <= 0 {
+		atrDist = price * 0.02
+		atr = price * 0.02 / slMult // synthetic ATR for TP calc
+		fmt.Printf("   ⚠️ ATR=0 guard: using 2%% of price as SL distance ($%.4f)\n", atrDist)
+	} else {
+		atrDist = atr * slMult
+	}
 
 	// ── Fee-adjusted minimum R:R gate ────────────────────────────────
 	roundTripFriction := price * (TAKER_FEE_RATE*2 + 0.001)
@@ -351,6 +363,9 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 			slVal, _ := strconv.ParseFloat(stopLossPrice, 64)
 			limVal, _ := strconv.ParseFloat(limitPriceStr, 64)
 			tpVal = math.Floor(tpVal/info.PriceStep) * info.PriceStep
+			if tpVal <= 0 {
+				tpVal = price * 0.001 // floor at 0.1% of price to prevent negative/zero TP
+			}
 			slVal = math.Floor(slVal/info.PriceStep) * info.PriceStep
 			limVal = math.Floor(limVal/info.PriceStep) * info.PriceStep
 			takeProfitPrice = strconv.FormatFloat(tpVal, 'f', -1, 64)
@@ -499,9 +514,32 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 
 	// Track portfolio-level risk: add this position's risk to the running total
 	globalPortfolioRiskPct += riskPct
+	savePortfolioRisk(globalPortfolioRiskPct)
 	fmt.Printf("   📊 Portfolio risk: %.2f%% / %.0f%% max\n", globalPortfolioRiskPct*100, MAX_PORTFOLIO_RISK*100)
 
 	fmt.Printf("✅ LIMIT ORDER PLACED: %s %s qty=%s limit=$%s | SL=$%s TP=$%s\n",
 		side, symbol, qtyStr, limitPriceStr, stopLossPrice, takeProfitPrice)
 	return nil
+}
+
+// loadPortfolioRisk reads the persisted portfolio risk percentage from disk.
+// Returns 0 if no file exists (first run / fresh state).
+func loadPortfolioRisk() float64 {
+	homeDir, _ := os.UserHomeDir()
+	path := homeDir + "/.hermes/portfolio_risk.txt"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	var v float64
+	fmt.Sscanf(string(data), "%f", &v)
+	return v
+}
+
+// savePortfolioRisk writes the current portfolio risk percentage to disk.
+// Called after each successful trade so subsequent cron cycles know about it.
+func savePortfolioRisk(v float64) {
+	homeDir, _ := os.UserHomeDir()
+	path := homeDir + "/.hermes/portfolio_risk.txt"
+	os.WriteFile(path, []byte(fmt.Sprintf("%.6f", v)), 0644)
 }

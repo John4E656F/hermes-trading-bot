@@ -172,7 +172,7 @@ func main() {
 	// ── Concurrent Data Ingestion Pipeline ──
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	sem := make(chan struct{}, 20) // Concurrency: 20 — batches 50 assets fast under Bybit rate limits
+	sem := make(chan struct{}, 30) // Concurrency: 30 — 50 assets in 2 waves
 
 	fmt.Printf("⚡ Initiating concurrent ingestion pipeline for %d assets...\n", len(watchlist))
 
@@ -211,8 +211,14 @@ func main() {
 			latestPrice := candles4h[len(candles4h)-1].Close
 
 			// Fetch OI + Funding (public endpoints, no auth)
-			oiRaw, _ := client.FetchOpenInterest(sym)
-			fundingRaw, _ := client.FetchFundingHistory(sym)
+			oiRaw, oiErr := client.FetchOpenInterest(sym)
+			fundingRaw, fundErr := client.FetchFundingHistory(sym)
+			if oiErr != nil {
+				fmt.Printf("   ⚠️ [%s] OI fetch error: %v\n", sym, oiErr)
+			}
+			if fundErr != nil {
+				fmt.Printf("   ⚠️ [%s] funding fetch error: %v\n", sym, fundErr)
+			}
 
 			// Compute derivatives
 			vp := ComputeVolumeProfile(candles1d, 30)
@@ -264,8 +270,8 @@ func main() {
 	marketAnalysis := AnalyzeMarket(marketData, watchlist)
 	PrintMarketAnalysis(marketAnalysis, len(watchlist))
 
-	// Reset portfolio risk counter for this cycle
-	globalPortfolioRiskPct = 0.0
+	// Portfolio risk persisted via executor.go's loadPortfolioRisk/savePortfolioRisk.
+	// Not resetting here — that would defeat cross-cycle persistence for open positions.
 
 	printAndExecuteSignals(marketData, marketAnalysis, executor, forceSignalToggle, watchlist, freezeEntries, scanMode, dryRunMode, openPositionSymbols)
 
@@ -368,7 +374,9 @@ func parseFloat(s string) (float64, error) {
 // readPeakEquity reads the peak equity from a local file so it persists across runs.
 // This enables %-based drawdown tracking. Returns 0 if no file exists yet.
 func readPeakEquity() float64 {
-	data, err := os.ReadFile("peak_equity.txt")
+	homeDir, _ := os.UserHomeDir()
+	path := homeDir + "/.hermes/peak_equity.txt"
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0
 	}
@@ -379,7 +387,9 @@ func readPeakEquity() float64 {
 
 // writePeakEquity persists the current peak equity to disk.
 func writePeakEquity(v float64) {
-	os.WriteFile("peak_equity.txt", []byte(fmt.Sprintf("%.2f", v)), 0644)
+	homeDir, _ := os.UserHomeDir()
+	path := homeDir + "/.hermes/peak_equity.txt"
+	os.WriteFile(path, []byte(fmt.Sprintf("%.2f", v)), 0644)
 }
 
 // drawdownRiskMultiplier returns a risk reduction factor based on current drawdown.
@@ -398,11 +408,11 @@ func drawdownRiskMultiplier(ddPct float64) float64 {
 }
 
 func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionEngine, forceActive bool, watchlist []string, freezeEntries bool, scanMode bool, dryRunMode bool, openPositionSymbols map[string]string) {
-	fmt.Println("\n=========================================================================================")
-	fmt.Println("                          HERMES LIVE EXECUTION DASHBOARD                            ")
-	fmt.Println("=========================================================================================")
+	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println("   🤖 HERMES LIVE EXECUTION DASHBOARD")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Printf("💰 Live Bybit Balance: $%.2f USDT\n", data.LiveBalance)
-	fmt.Println("=========================================================================================")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Printf("%-10s | %-12s | %-10s | %-22s | %-6s\n", "SYMBOL", "CONVICTION", "ADX (1D)", "ACTIVE STRATEGY", "SIGNAL")
 	fmt.Println("-----------------------------------------------------------------------------------------")
 
@@ -454,7 +464,12 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 		fmt.Printf("   ┗━ Local Reason: %s\n", sig.Reason)
 
 		// ── AI Council Evaluation for non-HOLD signals (skip in scan-only mode, runs in dry-run and live) ──
-		if sig.Action != ACTION_HOLD && (dryRunMode || !scanMode) {
+		// Skip AI Council for bypass-eligible signals: Conv3, Conv2+ADX>40, Conv2+S4
+		// These are structurally verified and would bypass the council anyway.
+		bypassEligible := sig.Conviction >= 3 ||
+			(sig.Conviction >= 2 && asset.Snap1d.Indicators.ADX14 > 40) ||
+			(sig.Conviction >= 2 && strings.Contains(sig.Strategy, "S4"))
+		if sig.Action != ACTION_HOLD && (dryRunMode || !scanMode) && !bypassEligible {
 			councilResult, councilLine := exec.EvaluateSignalCouncil(sig, asset)
 			fmt.Println(councilLine)
 
@@ -472,6 +487,18 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 					}
 				}
 			}
+		} else if sig.Action != ACTION_HOLD {
+			// Bypass-eligible: mark as auto-confirmed, no API call
+			bypassResult := CouncilResult{
+				FinalVerdict:     "CONFIRMED",
+				Confidence:       0.75,
+				ConsensusSummary: "Auto-confirmed (bypass-eligible signal)",
+				ConfirmCount:     1,
+				RejectCount:      0,
+			}
+			sig.AICouncilResult = &bypassResult
+			signalMap[symbol] = sig
+			fmt.Printf("   🏆 AI Council: BYPASSED (Conv%d, ADX %.0f) — auto-confirmed\n", sig.Conviction, asset.Snap1d.Indicators.ADX14)
 		}
 
 		gain7d := Compute7DayGain(asset.Snap1d.Candles)
@@ -786,7 +813,12 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 				asset := c.Asset
 				sig := c.Signal
 
-				if sig.Conviction < minConviction || sig.Confidence < 0.70 {
+if sig.Conviction < minConviction || sig.Confidence < 0.70 {
+				// Check bypass-eligible floor (0.60 for Conv3, Conv2+ADX>40, Conv2+S4)
+				dailyADX := asset.Snap1d.Indicators.ADX14
+				if (sig.Conviction >= 3 || (sig.Conviction >= 2 && dailyADX > 40) || (sig.Conviction >= 2 && strings.Contains(sig.Strategy, "S4"))) && sig.Confidence >= 0.60 {
+					// Passes bypass floor — let it through to executor
+				} else {
 					fmt.Printf("   [%s] Conv%d/%.0f%% — below threshold (need Conv%d/70%%). Logged only.\n",
 						asset.Symbol, sig.Conviction, sig.Confidence*100, minConviction)
 					outcomes[asset.Symbol] = struct {
@@ -861,8 +893,7 @@ func printAndExecuteSignals(data MarketData, ma MarketAnalysis, exec *ExecutionE
 			})
 		}
 	}
-	fmt.Println("=========================================================================================")
-}
+}}
 
 // ── Trend-Flip Detector: close positions where the 4H signal has flipped ──
 func closeConflictingPositions(client *BybitClient, data MarketData) {

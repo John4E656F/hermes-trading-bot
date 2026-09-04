@@ -35,6 +35,26 @@ func NewBybitClient() *BybitClient {
 	return client
 }
 
+// doGetWithRetry performs an HTTP GET with exponential backoff on 429 status.
+// Bybit rate limits: 10 req/s per IP on public endpoints; retry with 1-2-4s backoff.
+func (c *BybitClient) doGetWithRetry(url string) (*http.Response, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(1<<attempt) * time.Second)
+		}
+		resp, err := c.HTTPClient.Get(url)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != 429 {
+			return resp, nil
+		}
+		resp.Body.Close()
+		fmt.Printf("   ⚠️ Rate limited (429) on %s — retry %d/3 after %ds\n", url, attempt+1, 1<<attempt)
+	}
+	return nil, fmt.Errorf("rate limit exceeded after 3 retries: %s", url)
+}
+
 // SyncTime fetches Bybit's server time and calculates the clock offset
 func (c *BybitClient) SyncTime() {
 	resp, err := c.HTTPClient.Get(c.BaseURL + "/v5/market/time")
@@ -153,7 +173,7 @@ func (c *BybitClient) GetPrivateRequest(endpoint string) ([]byte, error) {
 // Bybit V5 requires: GET /v5/market/open-interest
 func (c *BybitClient) FetchOpenInterest(symbol string) ([]byte, error) {
 	url := fmt.Sprintf("%s/v5/market/open-interest?category=linear&symbol=%s&intervalTime=4h&limit=48", c.BaseURL, symbol)
-	resp, err := c.HTTPClient.Get(url)
+	resp, err := c.doGetWithRetry(url)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +185,7 @@ func (c *BybitClient) FetchOpenInterest(symbol string) ([]byte, error) {
 // Bybit V5 requires: GET /v5/market/funding/history
 func (c *BybitClient) FetchFundingHistory(symbol string) ([]byte, error) {
 	url := fmt.Sprintf("%s/v5/market/funding/history?category=linear&symbol=%s&limit=30", c.BaseURL, symbol)
-	resp, err := c.HTTPClient.Get(url)
+	resp, err := c.doGetWithRetry(url)
 	if err != nil {
 		return nil, err
 	}

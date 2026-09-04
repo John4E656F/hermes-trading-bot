@@ -36,26 +36,26 @@ func PrintActivePositionsQueries(client *BybitClient) {
 		return
 	}
 
-	fmt.Println("\n=========================================================================================")
-	fmt.Println("                               HERMES OPEN POSITIONS REPORT                               ")
-	fmt.Println("=========================================================================================")
+	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println("   📊 OPEN POSITIONS — HERMES BOT")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	hasPositions := false
 	
 	for _, pos := range res.Result.List {
 		// Size check determines if position is actually active
 		if pos.Size != "" && pos.Size != "0" {
 			hasPositions = true
-			fmt.Printf("● CONTRACT: %-10s | SIDE: %-5s | SIZE: %-6s | ENTRY: %-8s\n", 
-				pos.Symbol, pos.Side, pos.Size, pos.AvgPrice)
-			fmt.Printf("  ┗━ UNREALIZED P&L: %-9s USDT | TP TARGET: %-8s | SL SAFETY: %-8s\n\n", 
-				pos.UnrealizedPnL, pos.TakeProfit, pos.StopLoss)
+			fmt.Printf("\n  ● %s  [%s]\n", pos.Symbol, pos.Side)
+			fmt.Printf("    Size: %s | Entry: %s\n", pos.Size, pos.AvgPrice)
+			fmt.Printf("    uPnL: %s USDT | TP: %s | SL: %s\n", pos.UnrealizedPnL, pos.TakeProfit, pos.StopLoss)
 		}
 	}
 
 	if !hasPositions {
-		fmt.Println("   [ℹ️ No active leveraged positions running on account balance.]")
+		fmt.Println("\n  ℹ️  No active leveraged positions on account balance.")
+		fmt.Println("     All clear — nothing running right now.")
 	}
-	fmt.Println("=========================================================================================")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 }
 
 // PrintRecentClosedPnLSummary prints historical finalized trades (Wins/Losses)
@@ -79,17 +79,17 @@ func PrintRecentClosedPnLSummary(client *BybitClient) {
 	}
 
 	if json.Unmarshal(respBytes, &res) == nil && res.RetCode == 0 && len(res.Result.List) > 0 {
-		fmt.Println("\n=========================================================================================")
-		fmt.Println("                               HERMES CLOSED TRADES REFLECTION                           ")
-		fmt.Println("=========================================================================================")
+		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("   📈 CLOSED TRADES — REFLECTION")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		for _, trade := range res.Result.List {
 			verdict := "🟢 WIN"
 			if strings.HasPrefix(trade.ClosedPnL, "-") {
 				verdict = "🔴 LOSS"
 			}
-			fmt.Printf("[%s] Asset: %-8s | Action: Closed %-4s (%sx leverage)\n", verdict, trade.Symbol, trade.Side, trade.Leverage)
-			fmt.Printf("   ┗━ Realized Financial Delta: %s USDT\n\n", trade.ClosedPnL)
+			fmt.Printf("\n  %s  %s  [%s x%s]\n", verdict, trade.Symbol, trade.Side, trade.Leverage)
+			fmt.Printf("    Realized P&L: %s USDT\n", trade.ClosedPnL)
 		}
-		fmt.Println("=========================================================================================")
+		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	}
 }

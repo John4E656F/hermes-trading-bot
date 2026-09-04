@@ -18,7 +18,7 @@ It runs autonomously via cron every hour, scanning the **top 50 USDT pairs by vo
 
 ### 📊 Data Ingestion & Watchlists
 - **Top 50 by default** — fetches the 50 highest-volume USDT pairs by 24h turnover
-- **Concurrent pipeline** — 10‑goroutine semaphore pool for rate‑limit safety
+- **Concurrent pipeline** — 30‑goroutine semaphore pool for rate‑limit safety
 - **All endpoints** — 4h/1d OHLCV, Open Interest, Funding Rate history, wallet balance
 - **Configurable scan size** — `--watchlist=top13`, `--watchlist=top50`, `--watchlist=top100`
 
@@ -38,7 +38,7 @@ All non‑HOLD signals are validated by **5 independent LLMs** voting on trade q
 - Per‑model breakdown in dry‑run mode with verdict, confidence, and latency
 
 ### 📖 Reflection Memory
-Tracks **2,971 historical outcomes** per symbol from `kronos_outcomes.jsonl`:
+Tracks **3,224 historical outcomes** per symbol from `kronos_outcomes.jsonl`:
 - Win rate, recent trend (improving/declining/stable)
 - Winner vs loser size ratio
 - **Confidence multiplier**: 0.5x–1.5x based on reliability
@@ -94,6 +94,8 @@ Conviction scoring: S0 base (1) +1 per agreeing sub‑strategy → Conviction 1�
 ### 📋 Dashboard Outputs
 - **Live Execution Dashboard** — per‑symbol signals with conviction, ADX, strategy, AI Council verdict
 - **Market Conditions Analysis** — funding landscape, OI spikes, trending/ranging breakdown
+- **Open Positions Report** — compact `━━━` box style: symbol/side/size/entry/uPnL/TP/SL, or a clean "all clear" state
+- **Closed Trades Reflection** — last 3 settled trades with WIN/LOSS verdict and realized P&L
 - **Volume Profile Report** — surge ratios, 7D gain ranking
 - **Top Longs / Shorts** — ranked by conviction × gain
 - **4‑Hour Macro Snapshot** — Telegram broadcast every 4h boundary
@@ -105,7 +107,7 @@ Conviction scoring: S0 base (1) +1 per agreeing sub‑strategy → Conviction 1�
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                   CRON (every 60min)                         │
-│   ~/.hermes/scripts/run-bot.sh --watchlist=top50 --scan     │
+│   ~/.hermes/scripts/run-bot-1h.sh --watchlist=top50        │
 └───────────────────────────┬─────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────┐
@@ -214,7 +216,8 @@ hermes-trading-bot/
 ├── go.mod                   # Go module definition
 ├── .env                     # API credentials (gitignored)
 ├── run-bot.sh               # Cron entrypoint script
-├── hermes-bot               # Compiled binary
+├── hermes-bot               # Compiled binary (gitignored)
+├── risk_audit_report.md     # Risk audit findings & mitigations
 ├── kronos_outcomes.jsonl    # Historical outcome data
 ├── kronos_log.jsonl         # Kronos prediction log
 ├── signal_log.jsonl         # Signal snapshot log
@@ -236,7 +239,7 @@ hermes-trading-bot/
     ├── s6_kronos.go         # Kronos AI overlay client (optional)
     ├── types.go             # Core domain types
     ├── risk_guards.go       # Position guard, volume MA, 7D gain
-    ├── tracker.go           # Trade journal & P&L tracking
+    ├── tracker.go           # Trade journal & P&L tracking (compact report boxes)
     ├── trade_log.go         # Trade log JSONL writer
     ├── signal_log.go        # Signal snapshot JSONL writer
     ├── kronos_log.go        # Kronos prediction log writer

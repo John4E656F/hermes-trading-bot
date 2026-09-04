@@ -60,7 +60,9 @@ var globalSentimentReport MarketSentimentReport
 // indicator stack acts as confirmation (raises conviction) or vetoes (blocks).
 
 // getKronosPrediction returns the Kronos prediction for a symbol by checking
-// the batch cache first, then falling back to a per-symbol request.
+// the batch cache ONLY. No per-symbol HTTP fallback — the batch pre-fetch in
+// main() populates globalKronosPredictions before signal evaluation. A cache
+// miss returns nil so the signal path never blocks on a slow Kronos service.
 func getKronosPrediction(symbol string) *KronosPrediction {
 	if globalKronosClient == nil {
 		return nil
@@ -68,11 +70,7 @@ func getKronosPrediction(symbol string) *KronosPrediction {
 	if p, ok := globalKronosPredictions[symbol]; ok {
 		return &p
 	}
-	pred, err := globalKronosClient.FetchPrediction(symbol)
-	if err != nil || pred == nil {
-		return nil
-	}
-	return pred
+	return nil
 }
 
 // kronosToAction maps a Kronos direction string to a SignalAction.
@@ -245,10 +243,13 @@ func EvaluateMarketSnapshot(asset *AssetSnapshot) StrategySignal {
 	// real retracement. This is the #1 contributor to the 0.77x win/loss
 	// ratio on BUY side.
 	// Trend SELL kept: performs fine (0.98x ratio on SELL side).
+	// FIX (2026-09-03): Removed wrPct > -70 guard — in trending markets
+	// (ADX>40), W%R often goes below -70 on temporary pullbacks within
+	// a bear trend. The key condition is price < EMA20 in a strong trend.
 	if masterAction == ACTION_HOLD {
-		if dailyADX > 40 && latestPrice < ema20 && wrPct > -70 {
+		if dailyADX > 40 && latestPrice < ema20 {
 			masterAction = ACTION_SELL
-			masterReason = fmt.Sprintf("Trend SELL: ADX %.0f>40, below EMA20, W%%R %.0f (trend has room to fall).", dailyADX, wrPct)
+			masterReason = fmt.Sprintf("Trend SELL: ADX %.0f>40, below EMA20 (trend has room to fall).", dailyADX)
 			masterStrategy = "Trend Sell"
 		}
 	}
@@ -680,24 +681,16 @@ case agreeCount == 1:
 	// council API calls and pollute signal ranking. Force Conv1 BUY to HOLD.
 	// SELL Conv1 is allowed through for council evaluation — sells have
 	// healthy 0.98x ratio and the extra screening is valuable.
-	if signal.Action == ACTION_BUY && signal.Conviction <= 1 {
-		// CRITICAL FIX (2026-09-03): Allow S4 Funding Contrarian BUY at Conv1.
-		// S4 is structurally validated by funding rate economics — shorts paying
-		// -0.001+/8h means forced de-risking is inevitable regardless of price.
-		// Block only speculative BUY signals that didn't meet conviction.
-		if signal.Strategy == "S4 Funding Contrarian" || signal.Strategy == "CONFIRMED: S4 Funding Contrarian" {
-			// Allow through — funding contrarian doesn't need price momentum to be valid.
-			// But cap confidence to 0.70 (minimum execution threshold) so it still
-			// gets sized at baseline risk (0.35%).
-			signal.Confidence = math.Max(signal.Confidence, 0.70)
-			signal.Reason += " | S4 funding contrarian BUY bypasses Conv1 floor — funding economics override."
-		} else {
-			signal.Action = ACTION_HOLD
-			signal.Strategy = "HOLD"
-			signal.Reason = "BUY Conviction Floor: Conv1 buys blocked — insufficient evidence for long entries."
-			signal.Conviction = 0
-			signal.Confidence = 0.0
-		}
+	// FIX (2026-09-03): Reverted — Conv1 BUY with S0 verified and vol surge
+	// or ADX>40 bypass now goes through. The execute path checks Conv2+ anyway,
+	// but the boost logic in agreeCount==1 already handles Conv2 promotion.
+	// Only pure Conv0 (no S0, no boost) BUY is blocked.
+	if signal.Action == ACTION_BUY && signal.Conviction <= 0 {
+		signal.Action = ACTION_HOLD
+		signal.Strategy = "HOLD"
+		signal.Reason = "BUY Conviction Floor: no verification — insufficient evidence for long entries."
+		signal.Conviction = 0
+		signal.Confidence = 0.0
 	}
 
 	return signal
