@@ -88,7 +88,16 @@ func main() {
 
 	// ── Emergency Circuit Breaker: %-based drawdown ──
 	// Track peak equity across runs via peak_equity.txt
-	peakEquity := readPeakEquity()
+	peakEquity, peakErr := readPeakEquity()
+	if peakErr != nil {
+		fmt.Printf("🚨 PEAK EQUITY READ FAILURE: %v\n", peakErr)
+		if !scanMode {
+			fmt.Println("🚨 [EMERGENCY HALT] Cannot verify peak equity — refusing to trade with unknown drawdown state.")
+			os.Exit(1)
+		}
+		fmt.Println("⚠️ [SCAN] Proceeding with peak equity unknown (drawdown ladder disabled).")
+		peakEquity = 0
+	}
 	if liveBalance > peakEquity {
 		peakEquity = liveBalance
 		writePeakEquity(peakEquity)
@@ -158,6 +167,17 @@ func main() {
 		if freezeEntries {
 			fmt.Println("❄️ ENTRY FREEZE: Max concurrent exposure reached. All entry signals will be held.")
 		}
+	}
+
+	// ── Portfolio risk cap: recompute from LIVE positions every cycle ──
+	// The old implementation persisted an ever-increasing accumulator to disk;
+	// positions that closed never released their risk budget, permanently
+	// exhausting the 4% cap after ~5–11 trades. Recompute from Bybit each run
+	// so closed positions free their share immediately.
+	if !scanMode {
+		globalPortfolioRiskPct = recomputePortfolioRisk(client, liveBalance)
+	} else {
+		globalPortfolioRiskPct = 0.0
 	}
 
 	// Wire Execution Engine with the LIVE balance
@@ -270,8 +290,8 @@ func main() {
 	marketAnalysis := AnalyzeMarket(marketData, watchlist)
 	PrintMarketAnalysis(marketAnalysis, len(watchlist))
 
-	// Portfolio risk persisted via executor.go's loadPortfolioRisk/savePortfolioRisk.
-	// Not resetting here — that would defeat cross-cycle persistence for open positions.
+	// Portfolio risk recomputed from live positions at cycle start
+	// (see recomputePortfolioRisk in executor.go).
 
 	printAndExecuteSignals(marketData, marketAnalysis, executor, forceSignalToggle, watchlist, freezeEntries, scanMode, dryRunMode, openPositionSymbols)
 
@@ -372,17 +392,25 @@ func parseFloat(s string) (float64, error) {
 }
 
 // readPeakEquity reads the peak equity from a local file so it persists across runs.
-// This enables %-based drawdown tracking. Returns 0 if no file exists yet.
-func readPeakEquity() float64 {
+// This enables %-based drawdown tracking. Missing file on first run is fine
+// (returns 0, nil) — but ANY other read error (permissions, corruption) is
+// returned loudly so the drawdown ladder can never silently re-arm at full
+// risk because the peak vanished.
+func readPeakEquity() (float64, error) {
 	homeDir, _ := os.UserHomeDir()
 	path := homeDir + "/.hermes/peak_equity.txt"
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0
+		if os.IsNotExist(err) {
+			return 0, nil // first run — no peak recorded yet
+		}
+		return 0, err // fail loud: unreadable file must never mean "no drawdown"
 	}
 	var v float64
-	fmt.Sscanf(string(data), "%f", &v)
-	return v
+	if _, err := fmt.Sscanf(string(data), "%f", &v); err != nil || v <= 0 {
+		return 0, fmt.Errorf("peak equity file corrupt: %q", string(data))
+	}
+	return v, nil
 }
 
 // writePeakEquity persists the current peak equity to disk.

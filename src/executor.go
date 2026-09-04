@@ -15,11 +15,13 @@ import (
 // factor, making the drawdown ladder actually bite.
 var globalDrawdownMultiplier float64 = 1.0
 
-// globalPortfolioRiskPct tracks the sum of risk across all open positions.
-// Persisted to disk between cron cycles so the portfolio risk cap works
-// across sequential runs (positions opened in cycle N are remembered in cycle N+1).
-// Loaded from file at init, saved after each new trade.
-var globalPortfolioRiskPct = loadPortfolioRisk()
+// globalPortfolioRiskPct tracks the sum of risk across all open positions
+// for the CURRENT cycle only. It is recomputed from live Bybit positions at
+// the start of each run (see recomputePortfolioRisk) and accumulates only
+// while this process executes new trades. NOT persisted to disk — a stale
+// file accumulator only ever increments and permanently exhausts the 4% cap
+// (one-way ratchet bug, fixed 2026-09-04).
+var globalPortfolioRiskPct float64 = 0.0
 const MAX_PORTFOLIO_RISK = 0.04 // 4% total portfolio max stop-out risk
 
 const (
@@ -154,18 +156,25 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 		councilResult.FinalVerdict, councilResult.Confidence*100,
 		councilResult.ConfirmCount, councilResult.RejectCount, councilResult.ErroredCount)
 
-	// Conviction override: bypass AI Council for structurally sound signals
+	// Conviction override: bypass AI Council for structurally sound signals.
+	// This is deliberate risk policy — Conv3 / Conv2+ADX>40 / Conv2+S4 signals
+	// are auto-confirmed because the strategy stack already validated them.
+	// Set HERMES_ALLOW_COUNCIL_OVERRIDE=0 to disable this bypass and force
+	// EVERY signal through the 5-model council (no exceptions).
 	councilOverride := false
 	overrideReason := ""
-	if sig.Conviction >= 3 {
-		councilOverride = true
-		overrideReason = fmt.Sprintf("Conv%d override: highest confidence signal", sig.Conviction)
-	} else if sig.Conviction >= 2 && dailyADX > 40 {
-		councilOverride = true
-		overrideReason = fmt.Sprintf("Conv%d override: ADX %.0f>40 strong trend", sig.Conviction, dailyADX)
-	} else if sig.Conviction >= 2 && strings.Contains(sig.Strategy, "S4") {
-		councilOverride = true
-		overrideReason = "Conv2 override: S4 funding contrarian self-validating"
+	allowOverride := os.Getenv("HERMES_ALLOW_COUNCIL_OVERRIDE") != "0"
+	if allowOverride {
+		if sig.Conviction >= 3 {
+			councilOverride = true
+			overrideReason = fmt.Sprintf("Conv%d override: highest confidence signal", sig.Conviction)
+		} else if sig.Conviction >= 2 && dailyADX > 40 {
+			councilOverride = true
+			overrideReason = fmt.Sprintf("Conv%d override: ADX %.0f>40 strong trend", sig.Conviction, dailyADX)
+		} else if sig.Conviction >= 2 && strings.Contains(sig.Strategy, "S4") {
+			councilOverride = true
+			overrideReason = "Conv2 override: S4 funding contrarian self-validating"
+		}
 	}
 	if councilOverride {
 		fmt.Printf("   🏆 AI Council BYPASSED: %s — signal proceeds to execution\n", overrideReason)
@@ -512,9 +521,10 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 	entry.Executed = true
 	AppendTradeLog(entry)
 
-	// Track portfolio-level risk: add this position's risk to the running total
+	// Track portfolio-level risk: add this position's risk to the running total.
+	// Only accumulates within the current process run — main() recomputes from
+	// live Bybit positions at the start of every cycle via recomputePortfolioRisk.
 	globalPortfolioRiskPct += riskPct
-	savePortfolioRisk(globalPortfolioRiskPct)
 	fmt.Printf("   📊 Portfolio risk: %.2f%% / %.0f%% max\n", globalPortfolioRiskPct*100, MAX_PORTFOLIO_RISK*100)
 
 	fmt.Printf("✅ LIMIT ORDER PLACED: %s %s qty=%s limit=$%s | SL=$%s TP=$%s\n",
@@ -522,24 +532,50 @@ func (e *ExecutionEngine) ExecuteBracketTrade(sig StrategySignal, asset *AssetSn
 	return nil
 }
 
-// loadPortfolioRisk reads the persisted portfolio risk percentage from disk.
-// Returns 0 if no file exists (first run / fresh state).
-func loadPortfolioRisk() float64 {
-	homeDir, _ := os.UserHomeDir()
-	path := homeDir + "/.hermes/portfolio_risk.txt"
-	data, err := os.ReadFile(path)
+// recomputePortfolioRisk derives the current portfolio stop-out risk from
+// the LIVE Bybit position list: Σ size × |entry − SL| / capital for every
+// open position. This replaces the old file-persisted accumulator which only
+// ever incremented — positions that closed never released their risk budget,
+// so after ~5–11 trades the 4% cap was permanently exhausted and every future
+// entry was silently rejected. Called by main() at the start of each cycle.
+func recomputePortfolioRisk(client *BybitClient, capital float64) float64 {
+	respBytes, err := client.GetPrivateRequest("/v5/position/list?category=linear&settleCoin=USDT")
 	if err != nil {
+		fmt.Printf("   ⚠️ Portfolio risk recompute failed, assuming 0: %v\n", err)
 		return 0
 	}
-	var v float64
-	fmt.Sscanf(string(data), "%f", &v)
-	return v
-}
 
-// savePortfolioRisk writes the current portfolio risk percentage to disk.
-// Called after each successful trade so subsequent cron cycles know about it.
-func savePortfolioRisk(v float64) {
-	homeDir, _ := os.UserHomeDir()
-	path := homeDir + "/.hermes/portfolio_risk.txt"
-	os.WriteFile(path, []byte(fmt.Sprintf("%.6f", v)), 0644)
+	var res struct {
+		RetCode int `json:"retCode"`
+		Result  struct {
+			List []PositionReport `json:"list"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(respBytes, &res); err != nil || res.RetCode != 0 {
+		fmt.Printf("   ⚠️ Portfolio risk recompute parse failed, assuming 0.\n")
+		return 0
+	}
+
+	totalRisk := 0.0
+	for _, pos := range res.Result.List {
+		if pos.Size == "" || pos.Size == "0" {
+			continue
+		}
+		size, err1 := strconv.ParseFloat(pos.Size, 64)
+		entry, err2 := strconv.ParseFloat(pos.AvgPrice, 64)
+		sl, err3 := strconv.ParseFloat(pos.StopLoss, 64)
+		if err1 != nil || err2 != nil || err3 != nil || size <= 0 || entry <= 0 || sl <= 0 {
+			continue
+		}
+		riskPerUnit := math.Abs(entry - sl)
+		totalRisk += riskPerUnit * size
+	}
+
+	riskPct := totalRisk / capital
+	if capital <= 0 {
+		riskPct = 0
+	}
+	fmt.Printf("   📊 Recomputed live portfolio risk: $%.2f / $%.2f = %.2f%%\n",
+		totalRisk, capital, riskPct*100)
+	return riskPct
 }

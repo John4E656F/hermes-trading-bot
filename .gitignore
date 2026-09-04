@@ -5,3 +5,14 @@ __pycache__/
 *.swp
 hermes-bot
 botedition
+hermes-listener
+videos/
+logs/
+*.mp4
+*.log
+*.jsonl
+trade_*.json
+peak_equity.txt
+portfolio_risk.txt
+strategy.py
+production_activity.log
